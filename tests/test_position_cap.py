@@ -116,9 +116,50 @@ def test_sync_inventory_overwrites_and_resets_on_flat():
 
 def test_both_sides_quote_with_headroom_and_orders_are_cancelled_first():
     alpaca = FakeAlpaca()
-    *_, killed = _execute(alpaca, position_usd=0.0)
+    *_, killed = _execute(alpaca, position_usd=20.0)
     assert not killed
     assert alpaca.calls == [("cancel_all",), ("limit", "buy"), ("limit", "sell")]
+
+
+# --- cash account: sell only what is held --------------------------------
+
+def test_flat_position_quotes_the_buy_side_only_instead_of_a_rejected_sell():
+    # Regression (2026-09-23 18:02): every tick's $20 sell was rejected for
+    # insufficient balance while holding ~$10, and the quotes churned.
+    alpaca = FakeAlpaca()
+    line, *_ = _execute(alpaca, position_usd=0.0)
+    assert alpaca.calls == [("cancel_all",), ("limit", "buy")]
+    assert "sell side held" in line
+
+
+def test_sell_quote_is_trimmed_to_what_is_held():
+    alpaca = FakeAlpaca()
+    alpaca.submit_limit_order = lambda side, qty, price: alpaca.calls.append(("limit", side, qty))
+    _execute(alpaca, position_usd=15.0)
+    sells = [c for c in alpaca.calls if c[:2] == ("limit", "sell")]
+    assert sells and sells[0][2] <= 15.0 / MID
+
+
+def test_holding_under_the_minimum_skips_the_sell_quote():
+    alpaca = FakeAlpaca()
+    _execute(alpaca, position_usd=9.0)
+    assert ("limit", "sell") not in alpaca.calls
+
+
+def test_down_leg_is_held_when_the_sell_quote_already_reserves_the_holding():
+    alpaca = FakeAlpaca()
+    line, *_ = _execute(alpaca, position_usd=20.0, leg="down")
+    assert ("limit", "sell") in alpaca.calls
+    assert ("market", "sell") not in alpaca.calls
+    assert "sell leg held" in line
+
+
+def test_nothing_to_quote_does_not_re_cancel_every_tick():
+    # At the ceiling with nothing sellable, the next tick must wait
+    # rest_ticks instead of cancel-replacing again.
+    alpaca = FakeAlpaca()
+    *_, resting, rest_counter, _ = _execute(alpaca, position_usd=0.0)
+    assert resting is not None
 
 
 def test_cancel_happens_even_when_this_run_has_no_resting_quotes():

@@ -555,6 +555,15 @@ def _sync_inventory(inv: InventoryState, qty: float, avg_px: float, now: float) 
         inv.position_opened_at = None
 
 
+def _sellable_qty(inventory: float, spec: AssetSpec) -> float:
+    """How much can be sold without shorting: the held quantity, rounded
+    down to the venue's precision. Unlimited where shorting is allowed."""
+    if spec.shorting_allowed:
+        return float("inf")
+    step = 10**spec.qty_precision
+    return int(max(0.0, inventory) * step) / step
+
+
 def _kill_switch(alpaca, dry: bool) -> str:
     """Flatten and stop: cancel every resting order, then close the position
     at market. Orders are cancelled first because an open sell reserves the
@@ -692,7 +701,15 @@ def _execute_action(
         fill_qty, fill_price = None, None
         buy_qty = size_order(quote_notional, bid_px, spec)
         sell_qty = size_order(quote_notional, ask_px, spec)
+        # A cash account can only sell what it holds: trim the sell quote to
+        # the position, and skip it when that is under the venue minimum.
+        # Otherwise every sell is rejected and the quotes churn every tick.
+        held = _sellable_qty(snapshot["inventory"], spec)
+        sell_qty = min(sell_qty, held)
+        place_sell_quote = sell_qty * ask_px >= spec.min_notional_usd
         buy_note = "" if place_buy_quote or not replacing else " (buy side held: at position cap)"
+        if replacing and not place_sell_quote:
+            buy_note += " (sell side held: under the minimum order held)"
         # Gas-honesty rule: only cancel-replace every `rest_ticks` ticks.
         rest_counter += 1
         if replacing:
@@ -700,22 +717,25 @@ def _execute_action(
                 resting_quotes = {"bid": bid_px, "ask": ask_px}
                 rest_counter = 0
                 buy_txt = f"{buy_qty}" if place_buy_quote else "-"
-                fill_txt = f"dry: would quote {buy_txt}/{sell_qty} @ {bid_px:,.2f}/{ask_px:,.2f}"
+                sell_txt = f"{sell_qty}" if place_sell_quote else "-"
+                fill_txt = f"dry: would quote {buy_txt}/{sell_txt} @ {bid_px:,.2f}/{ask_px:,.2f}"
             else:
-                # Note: this account cannot short. A sell quote placed with
-                # no inventory to back it is a real, expected rejection on a
-                # cash account, caught as an AlpacaAPIError below. Always
-                # cancel first: orders left by an earlier run are not in
-                # `resting_quotes` but would still fill.
+                # Always cancel first: orders left by an earlier run are not
+                # in `resting_quotes` but would still fill. Any venue
+                # rejection is caught below and retried after `rest_ticks`,
+                # not on every tick.
                 try:
                     alpaca.cancel_all_orders()
                     resting_quotes = None
+                    rest_counter = 0
                     if place_buy_quote:
                         alpaca.submit_limit_order("buy", buy_qty, bid_px)
                         resting_quotes = {"bid": bid_px}
-                    alpaca.submit_limit_order("sell", sell_qty, ask_px)
-                    resting_quotes = {"bid": bid_px, "ask": ask_px}
-                    rest_counter = 0
+                    if place_sell_quote:
+                        alpaca.submit_limit_order("sell", sell_qty, ask_px)
+                        resting_quotes = dict(resting_quotes or {}, ask=ask_px)
+                    if resting_quotes is None:
+                        resting_quotes = {}  # nothing to quote: wait rest_ticks, don't re-cancel every tick
                 except MarketClosedError as exc:
                     return (
                         f"{line_action} ({exc})",
@@ -732,7 +752,7 @@ def _execute_action(
                         fill_txt,
                         None,
                         None,
-                        resting_quotes,
+                        resting_quotes if resting_quotes is not None else {},
                         rest_counter,
                         False,
                     )
@@ -751,6 +771,21 @@ def _execute_action(
                 )
             fill_px = bid_px if side == "sell" else ask_px
             leg_qty = size_order(directional_notional, fill_px, spec)
+            if side == "sell":
+                # Same cash-account rule: sell only what is held and not
+                # already reserved by the sell quote placed this tick.
+                reserved = sell_qty if (replacing and place_sell_quote) else 0.0
+                leg_qty = min(leg_qty, _sellable_qty(snapshot["inventory"] - reserved, spec))
+                if leg_qty * fill_px < spec.min_notional_usd:
+                    return (
+                        f"{action.kind} skew {action.skew:+.1f}{buy_note} + sell leg held: nothing to sell",
+                        fill_txt,
+                        None,
+                        None,
+                        resting_quotes,
+                        rest_counter,
+                        False,
+                    )
             if dry:
                 fill_txt = f"dry: would {side} {leg_qty} @ {fill_px:,.2f}"
                 line_action = (
