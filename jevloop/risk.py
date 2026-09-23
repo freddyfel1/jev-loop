@@ -26,12 +26,18 @@ def check(
     limits: Limits,
     api_error_streak: int,
     decision_latency_ms: float | None,
+    pending_buy_usd: float = 0.0,
 ) -> RiskVerdict:
     """`order_notional_usd` is the dollar value of the order about to be
     placed (qty * price), not a base-unit quantity: that is what makes
     every limit below mean the same thing whether the asset is a coin or
     a stock. Position value is derived from the snapshot's own inventory
-    and mid, never trusted from anywhere else."""
+    and mid, never trusted from anywhere else.
+
+    `pending_buy_usd` is every buy that could still land on the position
+    after this check: resting buy orders that will stay open plus the buys
+    this tick is about to place. The position cap counts it, so a resting
+    quote filling between ticks can never carry the position past the cap."""
     # 1. max drawdown
     if snapshot["drawdown_pct"] > limits.max_drawdown_pct:
         return RiskVerdict(False, "max_drawdown breached", kill=True)
@@ -48,6 +54,11 @@ def check(
     # 4. max order notional
     if order_notional_usd > limits.max_order_notional_usd:
         return RiskVerdict(False, "order exceeds max_order_notional_usd")
+
+    # 2 (projected). position plus every buy that could still fill. Vetoes
+    # rather than kills: nothing has been breached yet, it just must not be.
+    if position_usd + pending_buy_usd > limits.max_position_usd:
+        return RiskVerdict(False, "pending buys would breach max_position_usd")
 
     # 5. max inventory age
     if (

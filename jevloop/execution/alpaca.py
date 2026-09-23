@@ -168,11 +168,14 @@ class AlpacaPaperClient:
         }
         self._limiter = RateLimiter(calls_per_minute)
         self._clock_cache: tuple[float, dict] | None = None
+        # One keep-alive session for every call: without it each request pays
+        # a fresh TLS handshake, which is most of a tick's data-read time.
+        self._session = requests.Session()
 
     # -- low-level HTTP -----------------------------------------------
     def _request(self, method: str, url: str, **kwargs) -> dict:
         self._limiter.wait()
-        resp = requests.request(
+        resp = self._session.request(
             method, url, headers=self._headers, timeout=10, **kwargs
         )
         if resp.status_code == 401:
@@ -256,6 +259,51 @@ class AlpacaPaperClient:
     def cancel_all_orders(self) -> None:
         self._request("DELETE", f"{self.base_url}/v2/orders")
 
+    # -- position (the broker is the source of truth for inventory) ------
+    def _position_path(self) -> str:
+        return f"{self.base_url}/v2/positions/{self.symbol.replace('/', '')}"
+
+    def get_position(self) -> tuple[float, float]:
+        """(signed qty, avg entry price) the broker actually holds for this
+        symbol, (0.0, 0.0) when flat. Every fill lands here, from a market
+        leg or a resting quote alike, which is why the loop reads inventory
+        from this rather than counting its own orders."""
+        try:
+            data = self._request("GET", self._position_path())
+        except AlpacaAPIError as exc:
+            if exc.status_code == 404:
+                return 0.0, 0.0
+            raise
+        qty = abs(float(data.get("qty") or 0.0))
+        if data.get("side") == "short":
+            qty = -qty
+        return qty, float(data.get("avg_entry_price") or 0.0)
+
+    def get_open_buy_notional_usd(self) -> float:
+        """Dollar value still unfilled on this symbol's resting buy limit
+        orders: exposure the position cap has to count, because any of them
+        can fill between one tick and the next."""
+        orders = self._request(
+            "GET",
+            f"{self.base_url}/v2/orders",
+            params={"status": "open", "symbols": self.symbol, "limit": 500},
+        )
+        total = 0.0
+        for o in orders:
+            if o.get("side") != "buy" or not o.get("limit_price"):
+                continue
+            remaining = float(o.get("qty") or 0.0) - float(o.get("filled_qty") or 0.0)
+            total += max(0.0, remaining) * float(o["limit_price"])
+        return total
+
+    def close_position(self) -> None:
+        """Flatten this symbol at market. A 404 means it is already flat."""
+        try:
+            self._request("DELETE", self._position_path())
+        except AlpacaAPIError as exc:
+            if exc.status_code != 404:
+                raise
+
     # -- market data -----------------------------------------------
     def get_orderbook(self) -> dict:
         """Real L2 depth on crypto. Returns {} on equities (has_depth is
@@ -293,6 +341,7 @@ def client_from_env(
     symbol: str = "BTC/USD",
     live: bool = False,
     confirmation: str | None = None,
+    calls_per_minute: int = 90,
 ) -> AlpacaPaperClient:
     """Builds the execution client. Paper unless `live=True` AND
     JEV_LOOP_ALLOW_LIVE=i-understand-the-risk is set AND `confirmation`
@@ -316,10 +365,21 @@ def client_from_env(
         print("! account. There is no paper safety net under this run.")
         print("!" * 70 + "\n")
         return AlpacaPaperClient(
-            api_key, secret_key, spec=spec, base_url=base_url, _live_gate_passed=True
+            api_key,
+            secret_key,
+            spec=spec,
+            base_url=base_url,
+            calls_per_minute=calls_per_minute,
+            _live_gate_passed=True,
         )
 
     # Paper path: still allow ALPACA_BASE_URL to point at a stand-in
     # server for testing, exactly as before live trading existed at all.
     override_url = os.environ.get("ALPACA_BASE_URL", base_url)
-    return AlpacaPaperClient(api_key, secret_key, spec=spec, base_url=override_url)
+    return AlpacaPaperClient(
+        api_key,
+        secret_key,
+        spec=spec,
+        base_url=override_url,
+        calls_per_minute=calls_per_minute,
+    )

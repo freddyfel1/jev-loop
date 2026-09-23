@@ -57,5 +57,6 @@ class Limits:
         20.0  # dollar target for the directional-leg order
     )
     max_alpaca_calls_per_minute: int = (
-        90  # stays under Alpaca's free-tier data/trading limits
+        180  # ~6 calls a tick (book, trades, position, open orders, quotes) at 30 ticks/min;
+        # under Alpaca's free tier, which allows 200/min on trading and on data separately
     )

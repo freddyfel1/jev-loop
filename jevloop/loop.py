@@ -108,7 +108,10 @@ def run(
 
     try:
         alpaca = client_from_env(
-            symbol=spec.symbol, live=live, confirmation=confirmation
+            symbol=spec.symbol,
+            live=live,
+            confirmation=confirmation,
+            calls_per_minute=limits.max_alpaca_calls_per_minute,
         )
     except AlpacaConfigError as exc:
         print(f"cannot start: {exc}")
@@ -206,6 +209,20 @@ def run(
                 _sleep_remaining(tick_start, limits.tick_seconds)
                 n += 1
                 continue
+
+            # 2b. reconcile inventory with the broker. Resting quotes fill
+            # between ticks and a restart starts from nothing, so the only
+            # honest inventory is the one Alpaca reports, read every tick.
+            try:
+                pos_qty, pos_avg_px = alpaca.get_position()
+                open_buy_usd = alpaca.get_open_buy_notional_usd()
+            except AlpacaAPIError as exc:
+                api_error_streak += 1
+                print(f"tick {block} | alpaca error reading position: {exc}")
+                _sleep_remaining(tick_start, limits.tick_seconds)
+                n += 1
+                continue
+            _sync_inventory(inv, pos_qty, pos_avg_px, now)
 
             mid = (
                 (bids[0][0] + asks[0][0]) / 2
@@ -315,12 +332,12 @@ def run(
             fill_txt = "-"
             fill_qty = None
             fill_price = None
+            killed = False
             if rung == Rung.HOLD_LATE or action is None:
                 line_action = "HOLD (late)"
             elif rung == Rung.KILL or (action and action.kind == KILL):
                 line_action = "KILL (flatten)"
-                resting_quotes = None
-                inv.inventory = 0.0
+                killed = True
             else:
                 # 7. risk veto happens inside execute_action via risk.check
                 (
@@ -330,6 +347,7 @@ def run(
                     fill_price,
                     resting_quotes,
                     rest_counter,
+                    killed,
                 ) = _execute_action(
                     alpaca=alpaca,
                     spec=spec,
@@ -347,8 +365,16 @@ def run(
                     resting_quotes=resting_quotes,
                     rest_counter=rest_counter,
                     now=now,
+                    open_buy_usd=open_buy_usd,
                     dry=dry_execution,
                 )
+
+            kill_txt = None
+            if killed:
+                # A KILL is flatten-and-stop, not a line in the log: cancel
+                # every resting order, close the position at market, stop.
+                kill_txt = _kill_switch(alpaca, dry=dry_execution)
+                resting_quotes = None
 
             # 9. log
             record = {
@@ -393,6 +419,9 @@ def run(
                 "fill": fill_txt,
                 "fill_qty": fill_qty,
                 "fill_price": fill_price,
+                "open_buy_usd": round(open_buy_usd, 2),
+                "killed": killed,
+                "kill_result": kill_txt,
             }
             _append_log(record)
             recent_ticks.append(record)
@@ -420,8 +449,8 @@ def run(
                 f"tox {tox_txt} | env {env_txt} | xh {xh_txt} | {ms_txt} | {line_action} | {fill_txt}"
             )
 
-            if rung == Rung.KILL:
-                print(f"tick {block} | KILL: hard limit breached, flattened, stopping.")
+            if killed:
+                print(f"tick {block} | KILL: {line_action}; {kill_txt}; stopping.")
                 break
 
             n += 1
@@ -430,14 +459,16 @@ def run(
         return 0
     except (KeyboardInterrupt, _StopRequested):
         print(f"\ntick {block} | stopping: interrupt received.")
-        if resting_quotes and not dry_execution:
+        # Cancel unconditionally: `resting_quotes` only knows about this
+        # run's quotes, and an order left open by anything else still fills.
+        if not dry_execution:
             try:
                 alpaca.cancel_all_orders()
                 print(f"tick {block} | resting orders cancelled, shut down cleanly.")
             except AlpacaAPIError as exc:
                 print(f"tick {block} | could not cancel resting orders cleanly: {exc}")
         else:
-            print(f"tick {block} | shut down cleanly, no resting orders to cancel.")
+            print(f"tick {block} | shut down cleanly, dry run placed no orders.")
         return 0
     finally:
         if previous_sigterm_handler is not None:
@@ -503,6 +534,47 @@ def _closed_market_record(block: int, now: float, symbol: str) -> dict:
     }
 
 
+def _sync_inventory(inv: InventoryState, qty: float, avg_px: float, now: float) -> None:
+    """Overwrite the loop's inventory with what the broker actually holds."""
+    inv.inventory = qty
+    if qty:
+        inv.entry_price = avg_px
+        if inv.position_opened_at is None:
+            inv.position_opened_at = now
+    else:
+        inv.entry_price = 0.0
+        inv.position_opened_at = None
+
+
+def _kill_switch(alpaca, dry: bool) -> str:
+    """Flatten and stop: cancel every resting order, then close the position
+    at market. Orders are cancelled first because an open sell reserves the
+    quantity the close needs; the close is retried briefly while those
+    cancels settle. Returns a one-line summary for the tick log."""
+    if dry:
+        return "dry: would cancel all orders and close the position"
+    notes = []
+    try:
+        alpaca.cancel_all_orders()
+        notes.append("orders cancelled")
+    except AlpacaAPIError as exc:
+        notes.append(f"cancel failed: {exc}")
+    for attempt in range(3):
+        try:
+            alpaca.close_position()
+            notes.append("position closed at market")
+            break
+        except MarketClosedError as exc:
+            notes.append(f"close skipped: {exc}")
+            break
+        except AlpacaAPIError as exc:
+            if attempt == 2:
+                notes.append(f"close failed: {exc}")
+            else:
+                time.sleep(0.7)
+    return ", ".join(notes)
+
+
 def _execute_action(
     *,
     alpaca,
@@ -521,6 +593,7 @@ def _execute_action(
     resting_quotes,
     rest_counter,
     now,
+    open_buy_usd: float = 0.0,
     dry: bool = False,
 ):
     """Runs the risk check, then places (or, if `dry` is true, only logs)
@@ -529,16 +602,40 @@ def _execute_action(
     and gets a real Jev battery answer, but never touches the Alpaca order
     book. Every fill line in dry mode starts with "dry:". Order sizes are
     computed from a dollar target (assets.size_order), not a fixed
-    quantity, so the same limits work across any asset."""
+    quantity, so the same limits work across any asset.
+
+    Buys are only placed while they fit under max_position_usd together
+    with the current position and any resting buys that stay open; a buy
+    that does not fit is dropped (the sell side still quotes). The last
+    element of the returned tuple is True when risk.check returned a KILL."""
     from .risk import check as risk_check
+
+    quoting = action.kind in (QUOTE_BOTH_SIDES, QUOTE_WIDE)
+    replacing = quoting and (resting_quotes is None or rest_counter + 1 >= limits.rest_ticks)
+
+    # Headroom under the position cap. A cancel-replace cancels every
+    # resting buy first, so those only count when they will stay open.
+    position_usd = abs(snapshot["inventory"]) * mid
+    staying_buys_usd = 0.0 if replacing else open_buy_usd
+    headroom = limits.max_position_usd - position_usd - staying_buys_usd
+    place_buy_quote = replacing and quote_notional <= headroom
+    new_buys_usd = quote_notional if place_buy_quote else 0.0
+    leg_up_fits = directional_notional <= headroom - new_buys_usd
+    if action.direction_leg == "up" and leg_up_fits:
+        new_buys_usd += directional_notional
 
     order_notional_usd = max(quote_notional, directional_notional)
     verdict = risk_check(
-        snapshot, order_notional_usd, limits, api_error_streak, decision_latency_ms
+        snapshot,
+        order_notional_usd,
+        limits,
+        api_error_streak,
+        decision_latency_ms,
+        pending_buy_usd=staying_buys_usd + new_buys_usd,
     )
     if not verdict.ok:
         if verdict.kill:
-            return f"KILL ({verdict.veto})", "-", None, None, None, 0
+            return f"KILL ({verdict.veto})", "-", None, None, None, 0, True
         return (
             f"VETOED ({verdict.veto})",
             "-",
@@ -546,18 +643,19 @@ def _execute_action(
             None,
             resting_quotes,
             rest_counter,
+            False,
         )
 
     fill_txt = "-"
     line_action = action.kind
 
     if action.kind in (PULL_QUOTES, STAND_DOWN):
-        if resting_quotes and not dry:
+        if not dry:
             try:
                 alpaca.cancel_all_orders()
             except AlpacaAPIError:
                 pass
-        return line_action, fill_txt, None, None, None, 0
+        return line_action, fill_txt, None, None, None, 0, False
 
     if action.kind == WIDEN:
         wide_bid, wide_ask = bid_px * 0.999, ask_px * 1.001
@@ -568,27 +666,34 @@ def _execute_action(
             None,
             resting_quotes,
             rest_counter,
+            False,
         )
 
-    if action.kind in (QUOTE_BOTH_SIDES, QUOTE_WIDE):
+    if quoting:
         fill_qty, fill_price = None, None
         buy_qty = size_order(quote_notional, bid_px, spec)
         sell_qty = size_order(quote_notional, ask_px, spec)
+        buy_note = "" if place_buy_quote or not replacing else " (buy side held: at position cap)"
         # Gas-honesty rule: only cancel-replace every `rest_ticks` ticks.
         rest_counter += 1
-        if resting_quotes is None or rest_counter >= limits.rest_ticks:
+        if replacing:
             if dry:
                 resting_quotes = {"bid": bid_px, "ask": ask_px}
                 rest_counter = 0
-                fill_txt = f"dry: would quote {buy_qty}/{sell_qty} @ {bid_px:,.2f}/{ask_px:,.2f}"
+                buy_txt = f"{buy_qty}" if place_buy_quote else "-"
+                fill_txt = f"dry: would quote {buy_txt}/{sell_qty} @ {bid_px:,.2f}/{ask_px:,.2f}"
             else:
                 # Note: this account cannot short. A sell quote placed with
                 # no inventory to back it is a real, expected rejection on a
-                # cash account, caught as an AlpacaAPIError below.
+                # cash account, caught as an AlpacaAPIError below. Always
+                # cancel first: orders left by an earlier run are not in
+                # `resting_quotes` but would still fill.
                 try:
-                    if resting_quotes:
-                        alpaca.cancel_all_orders()
-                    alpaca.submit_limit_order("buy", buy_qty, bid_px)
+                    alpaca.cancel_all_orders()
+                    resting_quotes = None
+                    if place_buy_quote:
+                        alpaca.submit_limit_order("buy", buy_qty, bid_px)
+                        resting_quotes = {"bid": bid_px}
                     alpaca.submit_limit_order("sell", sell_qty, ask_px)
                     resting_quotes = {"bid": bid_px, "ask": ask_px}
                     rest_counter = 0
@@ -600,19 +705,31 @@ def _execute_action(
                         None,
                         resting_quotes,
                         rest_counter,
+                        False,
                     )
                 except AlpacaAPIError as exc:
                     return (
-                        f"{line_action} (order error: {exc})",
+                        f"{line_action}{buy_note} (order error: {exc})",
                         fill_txt,
                         None,
                         None,
                         resting_quotes,
                         rest_counter,
+                        False,
                     )
 
         if action.direction_leg in ("up", "down"):
             side = "buy" if action.direction_leg == "up" else "sell"
+            if side == "buy" and not leg_up_fits:
+                return (
+                    f"{action.kind} skew {action.skew:+.1f}{buy_note} + buy leg held: at position cap",
+                    fill_txt,
+                    None,
+                    None,
+                    resting_quotes,
+                    rest_counter,
+                    False,
+                )
             fill_px = bid_px if side == "sell" else ask_px
             leg_qty = size_order(directional_notional, fill_px, spec)
             if dry:
@@ -642,11 +759,11 @@ def _execute_action(
                     inv.orders_rejected += 1
                     fill_txt = f"leg rejected: {exc}"
         else:
-            line_action = f"{action.kind} skew {action.skew:+.1f}"
+            line_action = f"{action.kind} skew {action.skew:+.1f}{buy_note}"
 
-        return line_action, fill_txt, fill_qty, fill_price, resting_quotes, rest_counter
+        return line_action, fill_txt, fill_qty, fill_price, resting_quotes, rest_counter, False
 
-    return line_action, fill_txt, None, None, resting_quotes, rest_counter
+    return line_action, fill_txt, None, None, resting_quotes, rest_counter, False
 
 
 def _sleep_remaining(tick_start: float, tick_seconds: float) -> None:
