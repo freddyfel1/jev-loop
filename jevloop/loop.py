@@ -151,6 +151,7 @@ def run(
     recent_ticks: list[dict] = []
     block = 0
     started_at = time.time()
+    run_id = f"{started_at:.0f}"  # separates runs in log.jsonl for calibrate.py
 
     n = 0
     previous_sigterm_handler = None
@@ -178,6 +179,7 @@ def run(
                     continue
                 if not market_open:
                     record = _closed_market_record(block, now, spec.symbol)
+                    record["run_id"] = run_id
                     _append_log(record)
                     recent_ticks.append(record)
                     if len(recent_ticks) > LATEST_WINDOW:
@@ -387,7 +389,14 @@ def run(
                 "has_depth": spec.has_depth,
                 "regime": answers["regime"]["choice"] if answers else None,
                 "regime_conf": answers["regime"]["confidence"] if answers else None,
+                "run_id": run_id,
                 "direction": answers["direction"]["choice"] if answers else None,
+                # Jev's own P(up), what calibrate.py scores. Not a proxy.
+                "p_up": (
+                    answers["direction"].get("probabilities", {}).get("up")
+                    if answers
+                    else None
+                ),
                 "toxic_flow": answers["toxic_flow"]["noul"] if answers else None,
                 "liquidity_stressed": (
                     answers["liquidity_stressed"]["noul"] if answers else None

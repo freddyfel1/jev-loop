@@ -1,9 +1,22 @@
 """Calibration: does 80% mean 80% on this venue?
 
-Reads the tick log, pairs each `direction` call with the realised price
-move N ticks later, and reports a Brier score plus a 10-bin reliability
-table (predicted P(up) vs empirical frequency of up). Writes reliability.png
-if matplotlib happens to be installed; otherwise the table alone is enough.
+Reads the tick log, pairs Jev's own P(up) from each tick's direction
+answer with whether the price was actually higher N ticks later, and
+reports a Brier score, a skill score against always predicting the base
+rate, and a 10-bin reliability table. Writes reliability.png if
+matplotlib happens to be installed; otherwise the table alone is enough.
+
+Scored honestly:
+- only ticks that logged Jev's real P(up) (`p_up`) count; older log lines
+  without it are skipped, never filled in from some other answer's
+  confidence;
+- one model at a time (the most recent by default, never the mock unless
+  asked for), so a mock run can't flatter or sink a real model's score;
+- pairs never cross runs: a tick is only compared with a later tick from
+  the same run;
+- "up" means the mid was strictly higher; an unchanged price is not up,
+  and the share of unchanged outcomes is reported so a quiet market is
+  visible rather than silently scored.
 
 This is not "did Jev predict price" in isolation. It is the honest check
 the article insists on: if the model says 80%, does 80% actually happen.
@@ -18,6 +31,7 @@ from pathlib import Path
 
 LOG_DIR = Path(os.environ.get("JEV_LOOP_HOME", str(Path.home() / ".jev-loop")))
 LOG_FILE = LOG_DIR / "log.jsonl"
+DEFAULT_HORIZON = 30  # ticks: one minute at the default 2s tick
 
 
 def load_ticks() -> list[dict]:
@@ -32,31 +46,69 @@ def load_ticks() -> list[dict]:
     return ticks
 
 
-def pair_predictions(ticks: list[dict], horizon: int = 5) -> list[tuple[float, int]]:
-    """(predicted P(up), realised up-or-not) pairs, horizon ticks ahead."""
+def split_runs(ticks: list[dict]) -> list[list[dict]]:
+    """Group log lines into runs: by `run_id` where logged, otherwise by the
+    tick counter restarting (older logs, written before run_id existed)."""
+    runs: list[list[dict]] = []
+    for t in ticks:
+        if runs:
+            prev = runs[-1][-1]
+            same_id = t.get("run_id") is not None and t.get("run_id") == prev.get("run_id")
+            no_ids = t.get("run_id") is None and prev.get("run_id") is None
+            if same_id or (no_ids and t.get("tick", 0) > prev.get("tick", 0)):
+                runs[-1].append(t)
+                continue
+        runs.append([t])
+    return runs
+
+
+def run_model(run: list[dict]) -> str | None:
+    """The model that answered this run (the last one logged), or None."""
+    models = [t.get("model") for t in run if t.get("model")]
+    return models[-1] if models else None
+
+
+def pair_predictions(run: list[dict], horizon: int = DEFAULT_HORIZON) -> list[tuple[float, int]]:
+    """(Jev's P(up), 1 if the mid was higher `horizon` ticks later) for one
+    run. Ticks without a logged `p_up` are skipped."""
     pairs = []
-    for i, t in enumerate(ticks):
-        if t.get("direction") is None:
-            continue
+    for i, t in enumerate(run):
+        p_up = t.get("p_up")
         j = i + horizon
-        if j >= len(ticks):
+        if p_up is None or j >= len(run):
             continue
-        p_up = t.get("quote_environment_conf")  # proxy: confidence of the acted-on read
-        if t["direction"] == "up":
-            predicted_p_up = p_up if p_up is not None else 0.5
-        elif t["direction"] == "down":
-            predicted_p_up = 1 - (p_up if p_up is not None else 0.5)
-        else:
-            predicted_p_up = 0.5
-        realised_up = 1 if ticks[j]["mid"] > t["mid"] else 0
-        pairs.append((predicted_p_up, realised_up))
+        pairs.append((float(p_up), 1 if run[j]["mid"] > t["mid"] else 0))
     return pairs
+
+
+def unchanged_share(run: list[dict], horizon: int = DEFAULT_HORIZON) -> tuple[int, int]:
+    """(scored ticks whose mid was unchanged `horizon` ticks later, scored ticks)."""
+    flat = total = 0
+    for i, t in enumerate(run):
+        j = i + horizon
+        if t.get("p_up") is None or j >= len(run):
+            continue
+        total += 1
+        flat += run[j]["mid"] == t["mid"]
+    return flat, total
 
 
 def brier_score(pairs: list[tuple[float, int]]) -> float:
     if not pairs:
         return float("nan")
     return sum((p - y) ** 2 for p, y in pairs) / len(pairs)
+
+
+def brier_skill(pairs: list[tuple[float, int]]) -> tuple[float, float]:
+    """(base rate of up, skill vs always predicting that base rate).
+    Skill > 0 beats the base rate, 0 matches it, < 0 is worse."""
+    if not pairs:
+        return float("nan"), float("nan")
+    base = sum(y for _, y in pairs) / len(pairs)
+    reference = brier_score([(base, y) for _, y in pairs])
+    if reference == 0:
+        return base, float("nan")
+    return base, 1 - brier_score(pairs) / reference
 
 
 def reliability_table(pairs: list[tuple[float, int]], n_bins: int = 10) -> list[dict]:
@@ -76,9 +128,31 @@ def reliability_table(pairs: list[tuple[float, int]], n_bins: int = 10) -> list[
     return rows
 
 
+def choose_model(runs: list[list[dict]], requested: str | None) -> str | None:
+    """The requested model, else the most recent model that logged p_up and
+    is not the mock."""
+    if requested:
+        return requested
+    for run in reversed(runs):
+        model = run_model(run)
+        if model and not model.startswith("mock") and any(t.get("p_up") is not None for t in run):
+            return model
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="jev-loop calibrate")
-    parser.add_argument("--horizon", type=int, default=5, help="ticks ahead to check the realised outcome")
+    parser.add_argument(
+        "--horizon",
+        type=int,
+        default=DEFAULT_HORIZON,
+        help=f"ticks ahead to check the realised outcome (default {DEFAULT_HORIZON}, one minute at 2s ticks)",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="model to score, e.g. typesafe-ai/jev or mock-jev-0.1 (default: most recent non-mock model)",
+    )
     args = parser.parse_args(argv)
 
     ticks = load_ticks()
@@ -86,16 +160,42 @@ def main(argv: list[str] | None = None) -> int:
         print(f"No log found at {LOG_FILE}. Run `jev-loop run --ticks 60` first.")
         return 1
 
-    pairs = pair_predictions(ticks, horizon=args.horizon)
-    if not pairs:
-        print("Not enough ticks with a direction answer yet to calibrate. Run a longer session.")
+    runs = split_runs(ticks)
+    model = choose_model(runs, args.model)
+    if model is None:
+        print(
+            "No ticks with Jev's P(up) logged yet (older log lines predate it, and the "
+            "mock is only scored with --model mock-jev-0.1). Run the loop for a while first."
+        )
         return 1
 
+    model_runs = [r for r in runs if run_model(r) == model]
+    pairs = [p for r in model_runs for p in pair_predictions(r, args.horizon)]
+    if not pairs:
+        print(
+            f"Not enough {model} ticks with P(up) logged to look {args.horizon} ticks ahead "
+            "yet. Run a longer session."
+        )
+        return 1
+
+    flat = total = 0
+    for r in model_runs:
+        f, t = unchanged_share(r, args.horizon)
+        flat += f
+        total += t
     score = brier_score(pairs)
-    print(f"\ncalibration over {len(pairs)} decisions, horizon {args.horizon} ticks")
-    print(f"Brier score: {score:.4f} (0 = perfect, 0.25 = coin flip, 1 = always wrong)\n")
+    base, skill = brier_skill(pairs)
+
+    print(f"\nmodel {model}: {len(pairs)} decisions over {len(model_runs)} run(s), horizon {args.horizon} ticks")
+    print(f"Brier score: {score:.4f} (0 = perfect, 0.25 = coin flip, 1 = always wrong)")
+    print(f"price higher after {args.horizon} ticks: {base:.0%} of the time (unchanged: {flat / total:.0%})")
+    print(
+        f"skill vs always predicting {base:.0%}: {skill:+.3f} "
+        "(> 0 beats the base rate, 0 matches it, < 0 is worse)\n"
+    )
     print(f"{'bin':>10} {'n':>5} {'mean predicted':>15} {'empirical':>10}")
-    for row in reliability_table(pairs):
+    rows = reliability_table(pairs)
+    for row in rows:
         mp = f"{row['mean_predicted']:.2f}" if row["n"] else "-"
         emp = f"{row['empirical']:.2f}" if row["n"] else "-"
         print(f"{row['bin']:>10} {row['n']:>5} {mp:>15} {emp:>10}")
@@ -106,14 +206,19 @@ def main(argv: list[str] | None = None) -> int:
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        rows = reliability_table(pairs)
-        xs = [i / len(rows) + 0.5 / len(rows) for i in range(len(rows))]
-        ys = [r["empirical"] for r in rows]
+        filled = [r for r in rows if r["n"]]
         fig, ax = plt.subplots(figsize=(5, 5))
         ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="perfectly calibrated")
-        ax.plot(xs, ys, marker="o", label="this run")
-        ax.set_xlabel("predicted probability")
-        ax.set_ylabel("empirical frequency")
+        ax.plot(
+            [r["mean_predicted"] for r in filled],
+            [r["empirical"] for r in filled],
+            marker="o",
+            label=f"{model} ({len(pairs)} decisions)",
+        )
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_xlabel("predicted P(up)")
+        ax.set_ylabel(f"share higher after {args.horizon} ticks")
         ax.set_title("Reliability: does 80% mean 80%?")
         ax.legend()
         out = LOG_DIR / "reliability.png"
