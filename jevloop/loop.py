@@ -72,6 +72,9 @@ from .state import InventoryState, build_snapshot, record_fill_slippage, update_
 LOG_DIR = Path(os.environ.get("JEV_LOOP_HOME", str(Path.home() / ".jev-loop")))
 LOG_FILE = LOG_DIR / "log.jsonl"
 LATEST_FILE = LOG_DIR / "latest.json"
+# Creating this file asks a running loop to stop cleanly (cancel resting
+# orders, then exit), the same as Ctrl+C: what stop-bot.ps1 does.
+STOP_FILE = LOG_DIR / "stop.request"
 LATEST_WINDOW = 120
 
 
@@ -87,6 +90,17 @@ class _StopRequested(Exception):
 
 def _handle_sigterm(signum, frame) -> None:
     raise _StopRequested()
+
+
+def _check_stop_file() -> None:
+    """Raise _StopRequested if a stop was requested through STOP_FILE,
+    consuming the request so the next run doesn't stop at once."""
+    if STOP_FILE.exists():
+        try:
+            STOP_FILE.unlink()
+        except OSError:
+            pass
+        raise _StopRequested()
 
 
 def run(
@@ -160,8 +174,15 @@ def run(
     except (ValueError, AttributeError, OSError):
         pass  # not the main thread, or a platform without SIGTERM
 
+    # A stop request left over from before this run started is stale.
+    try:
+        STOP_FILE.unlink()
+    except OSError:
+        pass
+
     try:
         while ticks is None or n < ticks:
+            _check_stop_file()
             tick_start = time.monotonic()
             block += 1
             now = time.time()
@@ -467,7 +488,7 @@ def run(
 
         return 0
     except (KeyboardInterrupt, _StopRequested):
-        print(f"\ntick {block} | stopping: interrupt received.")
+        print(f"\ntick {block} | stopping: stop requested (Ctrl+C or Stop Trading Bot).")
         # Cancel unconditionally: `resting_quotes` only knows about this
         # run's quotes, and an order left open by anything else still fills.
         if not dry_execution:
