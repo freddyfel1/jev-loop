@@ -54,8 +54,15 @@ class StrategyThresholds:
 
     # the directional leg, bolted on so the demo shows fills, not just quotes
     direction_confidence_threshold: float = (
-        0.55  # direction.confidence above this -> take the leg
+        0.75  # direction.confidence above this -> take the leg
     )
+    # Raised from the video's 0.55 on 2026-09-23. Confidence c on the
+    # three-way up/down/neutral call means P(chosen side) ~ (2c + 1) / 3, so
+    # 0.55 traded at ~70% and 0.75 needs ~83%. The first calibration (219
+    # real-Jev decisions, 30-tick horizon) found calls at 70-80% were right
+    # 38% of the time and 80%+ only 44%: overconfident. At 0.75 the leg
+    # fired on 1 of 386 logged ticks, so the loop mostly just quotes until
+    # `jev-loop calibrate` shows Jev's high-confidence calls hold up.
 
 
 THRESHOLDS = StrategyThresholds()
