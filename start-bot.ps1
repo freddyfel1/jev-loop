@@ -7,19 +7,30 @@ $ErrorActionPreference = 'Stop'
 $project = $PSScriptRoot
 $launcher = Join-Path $project 'jev.ps1'
 $dashboard = 'http://127.0.0.1:8765/index.html'
+$startLog = Join-Path $project 'data\start-bot.log'
+
+function Write-StartLog($msg) {
+    Add-Content -Path $startLog -Value "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $msg"
+}
+trap { Write-StartLog "ERROR: $_"; break }
+Write-StartLog 'shortcut clicked'
 
 function Get-JevProcess($pattern) {
     Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
         Where-Object { $_.CommandLine -match 'jevloop' -and $_.CommandLine -match $pattern }
 }
 
-if (-not (Get-JevProcess 'serve')) {
+if (Get-JevProcess 'serve') { Write-StartLog 'dashboard server already running' }
+else {
+    Write-StartLog 'starting dashboard server'
     Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launcher, 'serve', '--port', '8765'
     )
 }
 
-if (-not (Get-JevProcess 'run --paper')) {
+if (Get-JevProcess 'run --paper') { Write-StartLog 'loop already running' }
+else {
+    Write-StartLog 'starting paper loop'
     $log = Join-Path $project 'data\continuous.log'
     $loopCmd = "`$host.UI.RawUI.WindowTitle = 'jev-loop (paper) - Ctrl+C to stop cleanly'; " +
         "`$env:PYTHONUNBUFFERED = '1'; Set-Location '$project'; " +
@@ -35,3 +46,4 @@ foreach ($i in 1..20) {
     catch { Start-Sleep -Milliseconds 500 }
 }
 Start-Process $dashboard
+Write-StartLog 'dashboard opened'
