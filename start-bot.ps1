@@ -31,12 +31,8 @@ else {
 if (Get-JevProcess 'run --paper') { Write-StartLog 'loop already running' }
 else {
     Write-StartLog 'starting paper loop'
-    $log = Join-Path $project 'data\continuous.log'
-    $loopCmd = "`$host.UI.RawUI.WindowTitle = 'jev-loop (paper) - Ctrl+C to stop cleanly'; " +
-        "`$env:PYTHONUNBUFFERED = '1'; Set-Location '$project'; " +
-        "& '$launcher' run --paper --forever 2>&1 | Tee-Object -FilePath '$log'"
-    Start-Process powershell.exe -WindowStyle Minimized -ArgumentList @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $loopCmd
+    Start-Process powershell.exe -WindowStyle Minimized -WorkingDirectory $project -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$(Join-Path $project 'run-loop.ps1')`""
     )
 }
 

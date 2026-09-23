@@ -38,6 +38,17 @@ does not read `.env` itself), sets `JEV_LOOP_HOME` to `.\data`, and sets
 TLS-scanning root; without it every HTTPS call fails with
 CERTIFICATE_VERIFY_FAILED. `uv` commands here need `--system-certs`.
 
+The venv's base Python lives in `C:\Users\Asus-Gaming\.uv-python`, not
+uv's default under `AppData\Roaming`: Claude's desktop app is packaged, so
+files it writes there are redirected into a private copy that the
+desktop shortcuts can't see ("No Python at ..."). When rebuilding the
+venv from Claude, set `UV_PYTHON_INSTALL_DIR=C:\Users\Asus-Gaming\.uv-python`.
+
+Start and stop with the desktop shortcuts "Trading Bot" (start-bot.ps1 →
+run-loop.ps1) and "Stop Trading Bot" (stop-bot.ps1, via data\stop.request).
+Every click and how each run ended is in `data\start-bot.log`. Don't start
+the continuous loop from a Claude tool shell: it lives in that process tree.
+
 Continuous runs go in a minimized PowerShell window titled "jev-loop";
 output tees to `data\continuous.log`. Stop with Ctrl+C in that window
 (cancels resting orders); `Stop-Process` does not cancel orders.

@@ -19,5 +19,8 @@ if (Test-Path $envFile) {
 $env:JEV_LOOP_HOME = Join-Path $project 'data'
 $bundle = Join-Path $env:JEV_LOOP_HOME 'ca-bundle.pem'
 if (Test-Path $bundle) { $env:REQUESTS_CA_BUNDLE = $bundle }
+# In Windows PowerShell 5.1, 'Stop' turns any stderr line from python (even a
+# warning) into a terminating error when output is redirected, e.g. teed to a log.
+$ErrorActionPreference = 'Continue'
 & (Join-Path $project '.venv\Scripts\python.exe') -m jevloop @args
 exit $LASTEXITCODE
