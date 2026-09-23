@@ -164,6 +164,37 @@ def test_resting_buys_that_stay_open_count_between_replaces():
     assert "buy leg held" in line
 
 
+def test_buys_stop_at_the_ceiling_below_the_hard_cap():
+    # $30 + $20 = $50 would be exactly the cap, but new buys stop at 90%
+    # ($45) so a small price rise can't turn a full position into a KILL.
+    alpaca = FakeAlpaca()
+    line, *_ = _execute(alpaca, position_usd=30.0)
+    assert ("limit", "buy") not in alpaca.calls
+    assert "buy side held" in line
+
+
+def test_buys_being_cancelled_still_count_on_a_cancel_replace():
+    # Regression (2026-09-23 tick 326-328): a $10 buy cancelled during a
+    # cancel-replace filled anyway while its replacement was already open.
+    # Resting buys must count even when this tick is replacing them.
+    alpaca = FakeAlpaca()
+    _execute(alpaca, position_usd=20.0, open_buy_usd=20.0, resting=None)
+    assert ("limit", "buy") not in alpaca.calls
+    assert ("limit", "sell") in alpaca.calls
+
+
+def test_veto_cancels_resting_buys_so_they_cannot_fill_past_the_cap():
+    # Regression (tick 327): position $45 plus a $10 resting buy was vetoed,
+    # but the buy stayed open, filled, and the next tick was a KILL.
+    alpaca = FakeAlpaca()
+    line, *_, killed = _execute(
+        alpaca, position_usd=45.0, open_buy_usd=10.0,
+        resting={"bid": MID - 5, "ask": MID + 5}, rest_counter=0,
+    )
+    assert line.startswith("VETOED") and not killed
+    assert alpaca.calls == [("cancel_all",)]
+
+
 def test_position_over_the_cap_returns_killed():
     alpaca = FakeAlpaca()
     line, *_, killed = _execute(alpaca, position_usd=144.0)

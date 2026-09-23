@@ -56,6 +56,10 @@ class Limits:
     directional_notional_usd: float = (
         20.0  # dollar target for the directional-leg order
     )
+    buy_ceiling_fraction: float = (
+        0.9  # new buys stop at 90% of max_position_usd, so order rounding or a
+        # small price rise can't push a full position over the hard cap (a KILL)
+    )
     max_alpaca_calls_per_minute: int = (
         180  # ~6 calls a tick (book, trades, position, open orders, quotes) at 30 ticks/min;
         # under Alpaca's free tier, which allows 200/min on trading and on data separately

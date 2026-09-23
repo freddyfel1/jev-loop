@@ -622,11 +622,13 @@ def _execute_action(
     quoting = action.kind in (QUOTE_BOTH_SIDES, QUOTE_WIDE)
     replacing = quoting and (resting_quotes is None or rest_counter + 1 >= limits.rest_ticks)
 
-    # Headroom under the position cap. A cancel-replace cancels every
-    # resting buy first, so those only count when they will stay open.
+    # Headroom under the buy ceiling (a fraction of the hard cap). Resting
+    # buys always count, even on a cancel-replace: Alpaca cancels
+    # asynchronously, and a buy being cancelled can still fill.
     position_usd = abs(snapshot["inventory"]) * mid
-    staying_buys_usd = 0.0 if replacing else open_buy_usd
-    headroom = limits.max_position_usd - position_usd - staying_buys_usd
+    staying_buys_usd = open_buy_usd
+    buy_ceiling = limits.max_position_usd * limits.buy_ceiling_fraction
+    headroom = buy_ceiling - position_usd - staying_buys_usd
     place_buy_quote = replacing and quote_notional <= headroom
     new_buys_usd = quote_notional if place_buy_quote else 0.0
     leg_up_fits = directional_notional <= headroom - new_buys_usd
@@ -645,6 +647,14 @@ def _execute_action(
     if not verdict.ok:
         if verdict.kill:
             return f"KILL ({verdict.veto})", "-", None, None, None, 0, True
+        if open_buy_usd > 0 and not dry:
+            # A veto must not leave resting buys behind: they would fill
+            # anyway and carry the position past the cap.
+            try:
+                alpaca.cancel_all_orders()
+                resting_quotes = None
+            except AlpacaAPIError:
+                pass
         return (
             f"VETOED ({verdict.veto})",
             "-",
