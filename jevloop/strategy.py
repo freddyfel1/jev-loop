@@ -53,13 +53,13 @@ class StrategyThresholds:
     inventory_pressure_max_score: float = 3.0  # denominator for the skew calculation
 
     # the directional leg, bolted on so the demo shows fills, not just quotes.
-    # Turned off on the morning of 2026-09-24, then back ON the same day at
-    # Freddy's request. The three calibrations before that (up to 3,572
-    # real-Jev decisions, 30-tick horizon) found no signal in Jev's
-    # direction call: price rose ~50% of the time whatever Jev said, and its
-    # ~7% "up" calls were followed by a rise 61% of the time. Set False to
-    # stop taking legs; re-check with `jev-loop calibrate`.
-    directional_legs_enabled: bool = True
+    # OFF (2026-09-24, briefly back on 09:51-10:00 that day, no legs taken).
+    # Calibrations of Jev's direction call up to 4,170 real-Jev decisions
+    # (30-tick horizon) found no signal: Brier 0.33, skill -0.32; price rose
+    # ~50% of the time whatever Jev said, and its ~7% "up" calls were
+    # followed by a rise 58% of the time. Set True to take legs again, gated
+    # by the threshold below, once `jev-loop calibrate` shows skill > 0.
+    directional_legs_enabled: bool = False
     direction_confidence_threshold: float = (
         0.75  # direction.confidence above this -> take the leg
     )
