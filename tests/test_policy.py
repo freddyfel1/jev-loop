@@ -69,7 +69,8 @@ def test_stand_down_below_quoting_floor():
     assert action.kind == STAND_DOWN
 
 
-def test_directional_legs_are_off_by_default():
+def test_no_directional_leg_when_legs_are_disabled(monkeypatch):
+    monkeypatch.setattr("jevloop.policy.THRESHOLDS.directional_legs_enabled", False)
     answers = dict(BASE_ANSWERS, direction={"choice": "up", "confidence": 0.99})
     action = compose_action(answers, BASE_SNAPSHOT, L)
     assert action.kind == QUOTE_BOTH_SIDES
