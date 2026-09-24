@@ -171,6 +171,7 @@ def run(
     fill_stats = _new_fill_stats()
     seen_fill_ids: set = set()
     fills_cursor = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started_at))
+    start_equity: float | None = None
 
     n = 0
     previous_sigterm_handler = None
@@ -473,8 +474,13 @@ def run(
                         )
                         or fills_cursor
                     )
-                except AlpacaAPIError:
+                    equity = float(alpaca.get_account().get("equity") or 0.0)
+                    if start_equity is None:
+                        start_equity = equity
+                    fill_stats["equity_change_usd"] = round(equity - start_equity, 2)
+                except (AlpacaAPIError, ValueError):
                     pass  # dashboard-only: try again next time
+            fill_stats["pnl_usd"] = _run_pnl(fill_stats, mid)
             _write_latest(
                 spec.symbol,
                 block,
@@ -616,7 +622,25 @@ FILL_POLL_TICKS = 15  # fetch fills for the dashboard every ~30s at 2s ticks
 
 
 def _new_fill_stats() -> dict:
-    return {"buy": 0, "sell": 0, "buy_usd": 0.0, "sell_usd": 0.0}
+    return {
+        "buy": 0,
+        "sell": 0,
+        "buy_usd": 0.0,
+        "sell_usd": 0.0,
+        "buy_qty": 0.0,
+        "sell_qty": 0.0,
+        "pnl_usd": 0.0,
+        "equity_change_usd": None,
+    }
+
+
+def _run_pnl(stats: dict, mid: float) -> float:
+    """Trading P/L from this run's fills, marked at `mid`: cash in from sells
+    minus cash out on buys, plus what the net quantity bought is worth now.
+    Excludes fees and the drift on any position held before the run; the
+    account's equity change (equity_change_usd) includes both."""
+    net_qty = stats["buy_qty"] - stats["sell_qty"]
+    return round(stats["sell_usd"] - stats["buy_usd"] + net_qty * mid, 2)
 
 
 def _tally_fills(activities: list[dict], stats: dict, seen: set, symbol: str) -> str | None:
@@ -632,10 +656,11 @@ def _tally_fills(activities: list[dict], stats: dict, seen: set, symbol: str) ->
         side = a.get("side")
         if side not in ("buy", "sell"):
             continue
+        qty = float(a.get("qty") or 0)
         stats[side] += 1
-        stats[f"{side}_usd"] = round(
-            stats[f"{side}_usd"] + float(a.get("qty") or 0) * float(a.get("price") or 0), 2
-        )
+        stats[f"{side}_qty"] = round(stats[f"{side}_qty"] + qty, 10)
+        # Unrounded dollars: rounding each fill to cents would drift the P/L.
+        stats[f"{side}_usd"] += qty * float(a.get("price") or 0)
     return latest
 
 

@@ -1,9 +1,11 @@
 import json
 
+import pytest
+
 from jevloop import loop
 from jevloop.assets import resolve_symbol
 from jevloop.execution.alpaca import AlpacaPaperClient
-from jevloop.loop import _new_fill_stats, _tally_fills
+from jevloop.loop import _new_fill_stats, _run_pnl, _tally_fills
 
 
 def _fill(id, side, qty="0.0001", price="84000", symbol="BTC/USD", t="2026-09-24T13:50:00Z"):
@@ -17,8 +19,23 @@ def test_tally_counts_buys_and_sells_with_dollars():
         stats, seen, "BTC/USD",
     )
     assert (stats["buy"], stats["sell"]) == (1, 2)
-    assert stats["buy_usd"] == 8.4 and stats["sell_usd"] == 16.8
+    assert stats["buy_usd"] == pytest.approx(8.4) and stats["sell_usd"] == pytest.approx(16.8)
+    assert stats["buy_qty"] == pytest.approx(0.0001) and stats["sell_qty"] == pytest.approx(0.0002)
     assert cursor == "2026-09-24T13:51:00Z"
+
+
+def test_run_pnl_is_the_spread_captured_plus_net_position_at_mid():
+    stats = _new_fill_stats()
+    # Bought 0.001 at 84,000 ($84), sold 0.001 at 84,010 ($84.01): +$0.01
+    # captured, flat, so the mid doesn't matter.
+    _tally_fills(
+        [_fill("a", "buy", qty="0.001", price="84000"), _fill("b", "sell", qty="0.001", price="84010")],
+        stats, set(), "BTC/USD",
+    )
+    assert _run_pnl(stats, mid=90_000.0) == pytest.approx(0.01)
+    # One more buy left unsold: marked at the mid, so a falling price shows.
+    _tally_fills([_fill("c", "buy", qty="0.001", price="84000")], stats, set(), "BTC/USD")
+    assert _run_pnl(stats, mid=83_000.0) == pytest.approx(0.01 - 1.0)
 
 
 def test_tally_never_counts_the_same_fill_twice():
