@@ -18,7 +18,7 @@ canvas{position:absolute;inset:0;width:100%;height:100%}
   tick <b id="b">—</b><br>
   last <b id="ms">—</b> · seven judgments · one call<br>
   decisions <b id="n">0</b> · <span id="mode">paper mode</span><br>
-  <span style="color:#5cf07a">green line = buying</span> · <span style="color:#ff5f5f">red line = selling</span>
+  <span style="color:#4fb3ff">blue = quoting both sides</span> · <span style="color:#5cf07a">green = buy trade</span> · <span style="color:#ff5f5f">red = sell trade</span>
 </div>
 <canvas id="c"></canvas>
 <script>
@@ -38,7 +38,14 @@ function sideOf(t){
   if(t.direction_leg==='up') return 'buy';
   if(t.direction_leg==='down') return 'sell';
   if(t.action==='PULL_QUOTES'||t.action==='STAND_DOWN') return 'late';
-  return (t.skew||0) < 0 ? 'sell' : 'buy';
+  return 'quote'; // resting orders on both sides, not a buy or a sell
+}
+const COL={buy:'#5cf07a',sell:'#ff5f5f',late:'#ffd166',quote:'#4fb3ff'};
+function wordOf(t,side){ return side==='quote'?'QUOTING':side==='late'?(t.action==='HOLD_LATE'?'LATE':(t.action||'HOLD')):side.toUpperCase(); }
+function confOf(t,side){
+  if((side==='buy'||side==='sell')&&t.p_up!=null) return 'P(up) '+Math.round(t.p_up*100)+'%';
+  if(side==='quote'&&t.quote_environment_conf!=null) return 'env '+Math.round(t.quote_environment_conf*100)+'%';
+  return '';
 }
 
 async function poll(){
@@ -64,9 +71,9 @@ function ingest(data){
   lastTick=t.tick;
 
   const side=sideOf(t);
-  const conf = t.quote_environment_conf!=null? t.quote_environment_conf : (t.regime_conf||0.5);
-  document.getElementById('s').textContent=(side==='late'?(t.action||'HOLD'):side.toUpperCase())+' '+Math.round(conf*100)+'%';
-  document.getElementById('s').style.color= side==='buy'?'#5cf07a':side==='sell'?'#ff5f5f':'#ffd166';
+  const word=wordOf(t,side), confTxt=confOf(t,side);
+  document.getElementById('s').textContent=word+(confTxt?' '+confTxt:'');
+  document.getElementById('s').style.color=COL[side];
   document.getElementById('b').textContent=t.tick.toLocaleString();
   document.getElementById('ms').textContent=t.latency_ms? Math.round(t.latency_ms)+' ms':'late';
   document.getElementById('n').textContent=(data.stats&&data.stats.calls||0).toLocaleString();
@@ -76,13 +83,13 @@ function ingest(data){
   modeEl.className = isMock? 'mockflag' : '';
 
   band={side,a:1};
-  bigWord={side,conf,a:1};
-  pulses.push({side,conf,a:1});
+  bigWord={side,word,confTxt,a:1};
+  pulses.push({side,a:1});
 }
 
 function draw(){
   ctx.fillStyle='#0a0a0a';ctx.fillRect(0,0,innerWidth,innerHeight);
-  if(band){band.a-=.035;if(band.a>0){ctx.fillStyle=(band.side==='buy'?'rgba(92,240,122,':band.side==='sell'?'rgba(255,80,80,':'rgba(255,209,102,')+(band.a*.22)+')';ctx.fillRect(RIGHT-140,TOP,140,BOT-TOP)}}
+  if(band){band.a-=.035;if(band.a>0){ctx.fillStyle=(band.side==='buy'?'rgba(92,240,122,':band.side==='sell'?'rgba(255,80,80,':band.side==='quote'?'rgba(79,179,255,':'rgba(255,209,102,')+(band.a*.22)+')';ctx.fillRect(RIGHT-140,TOP,140,BOT-TOP)}}
   ctx.strokeStyle='rgba(255,255,255,.07)';ctx.setLineDash([2,6]);ctx.lineWidth=1;
   if(lo!==null){
     for(let k=0;k<=4;k++){const v=lo+(hi-lo)*k/4,yy=y(v);ctx.beginPath();ctx.moveTo(LEFT,yy);ctx.lineTo(RIGHT,yy);ctx.stroke();ctx.fillStyle='rgba(255,255,255,.6)';ctx.font='12px "Fragment Mono",monospace';ctx.fillText(v.toFixed(1),RIGHT+14,yy+4)}
@@ -95,7 +102,7 @@ function draw(){
     for(let i=start+1;i<N;i++){
       if(pts[i]==null||pts[i-1]==null) continue;
       const x0=LEFT+(i-1-start)*stepX,x1=LEFT+(i-start)*stepX;
-      ctx.strokeStyle=sides[i]==='buy'?'#5cf07a':sides[i]==='sell'?'#ff5f5f':'rgba(255,255,255,.85)';
+      ctx.strokeStyle=sides[i]==='late'?'rgba(255,255,255,.85)':COL[sides[i]];
       ctx.beginPath();ctx.moveTo(x0,y(pts[i-1]));ctx.lineTo(x1,y(pts[i-1]));ctx.lineTo(x1,y(pts[i]));ctx.stroke();
     }
     const lastPx=pts[N-1];
@@ -109,10 +116,10 @@ function draw(){
 
   if(bigWord){bigWord.a-=.02;if(bigWord.a>0){
     ctx.globalAlpha=Math.min(1,bigWord.a*1.4);
-    ctx.fillStyle=bigWord.side==='buy'?'#5cf07a':bigWord.side==='sell'?'#ff5f5f':'#ffd166';
+    ctx.fillStyle=COL[bigWord.side];
     ctx.font='600 100px "Instrument Sans",sans-serif';ctx.textAlign='right';
-    ctx.fillText(bigWord.side.toUpperCase(),RIGHT-30,TOP+150+(1-bigWord.a)*-20);
-    ctx.font='26px "Fragment Mono",monospace';ctx.fillText('conf '+Math.round(bigWord.conf*100)+'%',RIGHT-34,TOP+186);
+    ctx.fillText(bigWord.word,RIGHT-30,TOP+150+(1-bigWord.a)*-20);
+    ctx.font='26px "Fragment Mono",monospace';ctx.fillText(bigWord.confTxt,RIGHT-34,TOP+186);
     ctx.textAlign='left';ctx.globalAlpha=1;
   }}
 
@@ -121,7 +128,7 @@ function draw(){
   for(const q of pulses){
     if(q.a<=0)continue;
     const yy = lo!==null && pts.length ? y(pts[pts.length-1]) : (TOP+BOT)/2;
-    ctx.globalAlpha=q.a*.9;ctx.strokeStyle=q.side==='buy'?'#5cf07a':q.side==='sell'?'#ff5f5f':'#ffd166';ctx.lineWidth=2.5;
+    ctx.globalAlpha=q.a*.9;ctx.strokeStyle=COL[q.side];ctx.lineWidth=2.5;
     ctx.beginPath();ctx.arc(RIGHT,yy,8+(1-q.a)*44,0,7);ctx.stroke();ctx.globalAlpha=1;
   }
 

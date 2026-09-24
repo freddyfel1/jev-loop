@@ -166,6 +166,11 @@ def run(
     block = 0
     started_at = time.time()
     run_id = f"{started_at:.0f}"  # separates runs in log.jsonl for calibrate.py
+    # Fills since this run started, for the dashboard: resting quotes fill
+    # between ticks, so they are fetched from Alpaca rather than seen here.
+    fill_stats = _new_fill_stats()
+    seen_fill_ids: set = set()
+    fills_cursor = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started_at))
 
     n = 0
     previous_sigterm_handler = None
@@ -457,8 +462,27 @@ def run(
             recent_ticks.append(record)
             if len(recent_ticks) > LATEST_WINDOW:
                 recent_ticks = recent_ticks[-LATEST_WINDOW:]
+            if not dry_execution and block % FILL_POLL_TICKS == 1:
+                try:
+                    fills_cursor = (
+                        _tally_fills(
+                            alpaca.get_fills_since(fills_cursor),
+                            fill_stats,
+                            seen_fill_ids,
+                            spec.symbol,
+                        )
+                        or fills_cursor
+                    )
+                except AlpacaAPIError:
+                    pass  # dashboard-only: try again next time
             _write_latest(
-                spec.symbol, block, recent_ticks, meta, started_at, api_error_streak
+                spec.symbol,
+                block,
+                recent_ticks,
+                meta,
+                started_at,
+                api_error_streak,
+                fills=None if dry_execution else fill_stats,
             )
 
             regime_txt = (
@@ -586,6 +610,33 @@ def _sync_inventory(inv: InventoryState, qty: float, avg_px: float, now: float) 
     else:
         inv.entry_price = 0.0
         inv.position_opened_at = None
+
+
+FILL_POLL_TICKS = 15  # fetch fills for the dashboard every ~30s at 2s ticks
+
+
+def _new_fill_stats() -> dict:
+    return {"buy": 0, "sell": 0, "buy_usd": 0.0, "sell_usd": 0.0}
+
+
+def _tally_fills(activities: list[dict], stats: dict, seen: set, symbol: str) -> str | None:
+    """Add not-yet-counted fills for `symbol` to `stats`; return the latest
+    transaction time seen (the cursor for the next fetch), or None."""
+    want = symbol.replace("/", "")
+    latest = None
+    for a in activities:
+        latest = a.get("transaction_time") or latest
+        if a.get("id") in seen or (a.get("symbol") or "").replace("/", "") != want:
+            continue
+        seen.add(a.get("id"))
+        side = a.get("side")
+        if side not in ("buy", "sell"):
+            continue
+        stats[side] += 1
+        stats[f"{side}_usd"] = round(
+            stats[f"{side}_usd"] + float(a.get("qty") or 0) * float(a.get("price") or 0), 2
+        )
+    return latest
 
 
 def _sellable_qty(inventory: float, spec: AssetSpec) -> float:
@@ -865,7 +916,9 @@ def _append_log(record: dict) -> None:
         f.write(json.dumps(record) + "\n")
 
 
-def _write_latest(symbol, block, ticks, meta, started_at, api_error_streak) -> None:
+def _write_latest(
+    symbol, block, ticks, meta, started_at, api_error_streak, fills: dict | None = None
+) -> None:
     calls = len(ticks)
     late = sum(1 for t in ticks if t["action"] in ("HOLD_LATE", "MARKET_CLOSED"))
     latencies = [t["latency_ms"] for t in ticks if t.get("latency_ms")]
@@ -883,6 +936,7 @@ def _write_latest(symbol, block, ticks, meta, started_at, api_error_streak) -> N
             "decision_client": meta.get("route"),
             "model": meta.get("model"),
             "api_error_streak": api_error_streak,
+            "fills": fills,
         },
     }
     # The dashboard feed must never stop trading. On Windows the replace is

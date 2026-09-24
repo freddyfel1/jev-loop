@@ -250,6 +250,9 @@
       .act.late {
         color: var(--amber);
       }
+      .act.quote {
+        color: var(--blue);
+      }
       .snap {
         margin-top: 12px;
         padding: 8px 10px;
@@ -314,6 +317,9 @@
       .strip i.late {
         background: #e2c072;
       }
+      .strip i.quote {
+        background: #9ccdf7;
+      }
       .strip i:last-child {
         outline: 2px solid var(--ink);
         outline-offset: 1px;
@@ -369,6 +375,9 @@
       .side.late .word {
         color: var(--amber);
       }
+      .side.quote .word {
+        color: var(--blue);
+      }
       .side .word.flip {
         animation: flip 0.45s ease;
       }
@@ -397,6 +406,9 @@
       }
       .side.sell .flash {
         background: var(--red-soft);
+      }
+      .side.quote .flash {
+        background: var(--blue-soft);
       }
       .side .flash.go {
         animation: flash 0.5s ease;
@@ -477,6 +489,9 @@
       .feed tr.late td {
         background: var(--amber-soft);
       }
+      .feed tr.quote td {
+        background: var(--blue-soft);
+      }
       .feed td.a {
         font-weight: 600;
         color: var(--ink);
@@ -489,6 +504,9 @@
       }
       .feed tr.late td.a {
         color: var(--amber);
+      }
+      .feed tr.quote td.a {
+        color: var(--blue);
       }
       .feed tr:first-child td {
         animation: in 0.35s ease;
@@ -522,6 +540,8 @@
         ><span>avg <b id="avgms">—</b></span
         ><span><b id="calls">0</b> decisions</span
         ><span>late <b id="late">0</b></span
+        ><span title="orders Alpaca filled since this run started, resting quotes included"
+          >fills <b id="fills">—</b></span
         ><span class="right">uptime <b id="up">00:00:00</b></span>
       </div>
       <div class="grid">
@@ -547,7 +567,8 @@
           <div class="strip" id="strip"></div>
           <div class="foot">
             <span
-              >one dot per tick · green buy · red sell · amber late/hold</span
+              >one dot per tick · blue quoting · green buy · red sell ·
+              amber late/hold</span
             ><span id="cadence">— s ticks · one decision per tick</span>
           </div>
         </section>
@@ -609,7 +630,26 @@
         if (t.direction_leg === "down") return "sell";
         if (t.action === "PULL_QUOTES" || t.action === "STAND_DOWN")
           return "late";
-        return (t.skew || 0) < 0 ? "sell" : "buy"; // quoting with no leg: colour by skew direction
+        // Quoting with no directional leg: resting orders on both sides, not
+        // a buy or a sell. (It used to be coloured by skew, which is 0 on
+        // QUOTE_WIDE, so every quoting tick read as BUY.)
+        return "quote";
+      }
+
+      function wordOf(t, side) {
+        if (side === "quote") return "QUOTING";
+        if (side === "late") return t.action === "HOLD_LATE" ? "LATE" : t.action;
+        return side.toUpperCase();
+      }
+
+      // BUY/SELL come from Jev's direction call, so show its P(up) there;
+      // a quoting tick shows how confident the quote-environment read was.
+      function confOf(t, side) {
+        if ((side === "buy" || side === "sell") && t.p_up != null)
+          return "P(up) " + Math.round(t.p_up * 100) + "%";
+        if (side === "quote" && t.quote_environment_conf != null)
+          return "env " + Math.round(t.quote_environment_conf * 100) + "%";
+        return "";
       }
 
       async function poll() {
@@ -662,6 +702,10 @@
           : "—";
         $("calls").textContent = (stats.calls || 0).toLocaleString();
         $("late").textContent = stats.late_count || 0;
+        const fills = stats.fills;
+        $("fills").textContent = fills
+          ? `${fills.buy} buy / ${fills.sell} sell`
+          : "—";
         const upS = Math.floor((Date.now() - startedAt) / 1000);
         $("up").textContent = [upS / 3600, (upS % 3600) / 60, upS % 60]
           .map((x) => String(Math.floor(x)).padStart(2, "0"))
@@ -704,12 +748,7 @@
         const sideEl = $("side"),
           word = $("word");
         sideEl.className = "card side " + side;
-        const label =
-          side === "late"
-            ? t.action === "HOLD_LATE"
-              ? "LATE"
-              : t.action
-            : side.toUpperCase();
+        const label = wordOf(t, side);
         if (word.textContent !== label) {
           word.textContent = label;
           word.classList.remove("flip");
@@ -720,10 +759,7 @@
           void f.offsetWidth;
           f.classList.add("go");
         }
-        $("wpct").textContent =
-          t.quote_environment_conf != null
-            ? Math.round(t.quote_environment_conf * 100) + "%"
-            : "";
+        $("wpct").textContent = confOf(t, side);
         const envPct =
           t.quote_environment != null
             ? Math.min(100, (t.quote_environment / 3) * 100)
@@ -751,7 +787,7 @@
         const fill = t.fill_qty
           ? `${t.fill_qty} @ ${t.fill_price ? t.fill_price.toLocaleString(undefined, { maximumFractionDigits: 1 }) : "—"}`
           : "—";
-        tr.innerHTML = `<td>${t.tick}</td><td class="a">${label}</td><td>${t.quote_environment_conf != null ? "conf " + t.quote_environment_conf.toFixed(2) : ""}</td><td>${t.latency_ms ? Math.round(t.latency_ms) + "ms" : "late"}</td><td>${fill}</td><td>paper</td>`;
+        tr.innerHTML = `<td>${t.tick}</td><td class="a">${label}</td><td>${confOf(t, side)}</td><td>${t.latency_ms ? Math.round(t.latency_ms) + "ms" : "late"}</td><td>${fill}</td><td>paper</td>`;
         feed.prepend(tr);
         while (feed.children.length > 16) feed.lastChild.remove();
 
@@ -785,7 +821,7 @@
         const last = pts[pts.length - 1],
           lx = X(N - 1),
           ly = Y(last.px),
-          col = { buy: "#1f7a4d", sell: "#b91c1c", late: "#b7791f" };
+          col = { buy: "#1f7a4d", sell: "#b91c1c", late: "#b7791f", quote: "#0a8cff" };
         const grid = [0, 1, 2, 3]
           .map((k) => {
             const v = lo + (span * k) / 3,

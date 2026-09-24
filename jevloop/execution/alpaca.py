@@ -301,6 +301,24 @@ class AlpacaPaperClient:
             total += max(0.0, remaining) * float(o["limit_price"])
         return total
 
+    def get_fills_since(self, after_iso: str, max_pages: int = 10) -> list[dict]:
+        """Every fill (FILL account activity) on the account after
+        `after_iso`, oldest first, across pages. Includes resting-quote
+        fills, which no tick sees directly; the dashboard counts them."""
+        fills: list[dict] = []
+        params = {"after": after_iso, "direction": "asc", "page_size": 100}
+        for _ in range(max_pages):
+            page = self._request(
+                "GET", f"{self.base_url}/v2/account/activities/FILL", params=params
+            )
+            if not page:
+                break
+            fills.extend(page)
+            if len(page) < 100:
+                break
+            params = dict(params, page_token=page[-1]["id"])
+        return fills
+
     def close_position(self) -> None:
         """Flatten this symbol at market. A 404 means it is already flat."""
         try:
