@@ -175,9 +175,14 @@ class AlpacaPaperClient:
     # -- low-level HTTP -----------------------------------------------
     def _request(self, method: str, url: str, **kwargs) -> dict:
         self._limiter.wait()
-        resp = self._session.request(
-            method, url, headers=self._headers, timeout=10, **kwargs
-        )
+        try:
+            resp = self._session.request(
+                method, url, headers=self._headers, timeout=10, **kwargs
+            )
+        except requests.RequestException as exc:
+            # A network blip is an API error like any other: the loop counts
+            # it toward max_api_errors and carries on, instead of crashing.
+            raise AlpacaAPIError(0, f"network error: {exc}") from exc
         if resp.status_code == 401:
             raise AlpacaAPIError(
                 401,

@@ -69,7 +69,15 @@ def test_stand_down_below_quoting_floor():
     assert action.kind == STAND_DOWN
 
 
-def test_directional_leg_only_when_confident_and_quoting():
+def test_directional_legs_are_off_by_default():
+    answers = dict(BASE_ANSWERS, direction={"choice": "up", "confidence": 0.99})
+    action = compose_action(answers, BASE_SNAPSHOT, L)
+    assert action.kind == QUOTE_BOTH_SIDES
+    assert action.direction_leg is None
+
+
+def test_directional_leg_only_when_confident_and_quoting(monkeypatch):
+    monkeypatch.setattr("jevloop.policy.THRESHOLDS.directional_legs_enabled", True)
     answers = dict(BASE_ANSWERS, direction={"choice": "up", "confidence": 0.9})
     action = compose_action(answers, BASE_SNAPSHOT, L)
     assert action.kind == QUOTE_BOTH_SIDES
@@ -80,7 +88,8 @@ def test_directional_leg_only_when_confident_and_quoting():
     assert action2.direction_leg is None
 
 
-def test_directional_leg_never_fires_on_pull_or_widen():
+def test_directional_leg_never_fires_on_pull_or_widen(monkeypatch):
+    monkeypatch.setattr("jevloop.policy.THRESHOLDS.directional_legs_enabled", True)
     answers = dict(
         BASE_ANSWERS,
         toxic_flow={"noul": 0.9},

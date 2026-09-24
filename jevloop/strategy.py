@@ -52,7 +52,13 @@ class StrategyThresholds:
     quote_env_wide_score: float = 1.0  # env >= this (but below full) -> quote wide
     inventory_pressure_max_score: float = 3.0  # denominator for the skew calculation
 
-    # the directional leg, bolted on so the demo shows fills, not just quotes
+    # the directional leg, bolted on so the demo shows fills, not just quotes.
+    # OFF since 2026-09-24: three calibrations (up to 3,572 real-Jev
+    # decisions, 30-tick horizon) found no signal in Jev's direction call.
+    # Price rose ~50% of the time whatever Jev said, and its ~7% "up" calls
+    # were followed by a rise 61% of the time. Set True to take legs again,
+    # gated by the threshold below, once `jev-loop calibrate` shows skill > 0.
+    directional_legs_enabled: bool = False
     direction_confidence_threshold: float = (
         0.75  # direction.confidence above this -> take the leg
     )

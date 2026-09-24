@@ -500,6 +500,18 @@ def run(
         else:
             print(f"tick {block} | shut down cleanly, dry run placed no orders.")
         return 0
+    except Exception as exc:
+        # Anything unexpected still goes out through a clean shutdown, so a
+        # crash never leaves resting orders behind to fill unattended. The
+        # exception is re-raised afterwards so it is logged and exits non-zero.
+        print(f"\ntick {block} | stopping: unexpected error: {exc!r}")
+        if not dry_execution:
+            try:
+                alpaca.cancel_all_orders()
+                print(f"tick {block} | resting orders cancelled before exiting.")
+            except Exception as cancel_exc:
+                print(f"tick {block} | could not cancel resting orders: {cancel_exc}")
+        raise
     finally:
         if previous_sigterm_handler is not None:
             signal.signal(signal.SIGTERM, previous_sigterm_handler)
@@ -873,9 +885,21 @@ def _write_latest(symbol, block, ticks, meta, started_at, api_error_streak) -> N
             "api_error_streak": api_error_streak,
         },
     }
+    # The dashboard feed must never stop trading. On Windows the replace is
+    # refused while another process holds latest.json open for a moment (the
+    # dashboard server reading it, antivirus scanning it): retry briefly,
+    # then skip this tick's update. Regression: 2026-09-24 09:03 a single
+    # "Access is denied" here killed the loop without cancelling orders.
     tmp = LATEST_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload))
-    tmp.replace(LATEST_FILE)
+    for attempt in range(5):
+        try:
+            tmp.write_text(json.dumps(payload))
+            tmp.replace(LATEST_FILE)
+            return
+        except OSError as exc:
+            last_exc = exc
+            time.sleep(0.05 * (attempt + 1))
+    print(f"tick {block} | dashboard feed not updated this tick: {last_exc}")
 
 
 def main(argv: list[str] | None = None) -> int:

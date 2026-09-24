@@ -86,7 +86,7 @@ def _compose_from_thresholds(answers: dict, snapshot: dict, limits: Limits) -> A
 
     # Directional leg: bolted onto a quoting action so the demo shows fills
     # constantly, not just resting quotes. Never overrides a KILL/PULL/WIDEN.
-    if action.kind in (QUOTE_BOTH_SIDES, QUOTE_WIDE):
+    if THRESHOLDS.directional_legs_enabled and action.kind in (QUOTE_BOTH_SIDES, QUOTE_WIDE):
         direction = answers["direction"]
         if (
             direction["choice"] != "neutral"
