@@ -1,6 +1,6 @@
 """`jevloop serve`: a tiny static file server for the dashboard.
 
-Serves the dashboard HTML files alongside ~/.jev-loop/latest.json so
+Serves the dashboard HTML files alongside data/latest.json so
 dashboard/index.html and dashboard/wall.html can poll it with a plain
 fetch(). No framework, no build step: http.server with two directories
 merged via a symlink-free request handler.
@@ -14,7 +14,7 @@ import os
 import socketserver
 from pathlib import Path
 
-LOG_DIR = Path(os.environ.get("JEV_LOOP_HOME", str(Path.home() / ".jev-loop")))
+LOG_DIR = Path(os.environ.get("JEV_LOOP_HOME", str(Path(__file__).resolve().parent.parent / "data")))
 SKILL_DIR = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = SKILL_DIR / "dashboard"
 
