@@ -354,3 +354,141 @@ def test_sell_when_long_closes_the_long_and_no_more(monkeypatch):
     closing = alp.orders[-1]
     assert closing["side"] == "sell" and float(closing["filled_qty"]) == 0.0003
     assert "closing long" in fill_txt and alp.held == 0.0  # flat, never short
+
+
+# -- Two-sided quotes never stack unbacked buys (paper run 2026-09-25) --------
+
+
+class QuotingAlpaca(FakeAlpaca):
+    """FakeAlpaca plus resting limit orders; can reject every sell like a
+    cash account with no inventory does."""
+
+    def __init__(self, reject_sells=False):
+        super().__init__()
+        self.reject_sells = reject_sells
+
+    def submit_limit_order(self, side, qty, px):
+        if side == "sell" and self.reject_sells:
+            raise AlpacaAPIError(403, "insufficient balance")
+        self._order_seq += 1
+        o = {
+            "id": f"o{self._order_seq}",
+            "client_order_id": f"{self.order_prefix}{self._order_seq}",
+            "side": side,
+            "qty": qty,
+            "status": "new",
+        }
+        self.orders.append(o)
+        return o
+
+
+def _quote(monkeypatch, alp, inv, resting=None):
+    from jevloop import risk
+    from jevloop.limits import Limits
+    from jevloop.policy import QUOTE_BOTH_SIDES, Action
+
+    monkeypatch.setattr(risk, "check", lambda *a, **k: risk.RiskVerdict(ok=True))
+    return loop._execute_action(
+        alpaca=alp,
+        spec=resolve_symbol("BTC/USD"),
+        action=Action(QUOTE_BOTH_SIDES, "test"),
+        bid_px=100.0,
+        ask_px=101.0,
+        mid=100.5,
+        quote_notional=10.0,
+        directional_notional=10.0,
+        snapshot={},
+        limits=Limits(),  # max_position_usd 50
+        inv=inv,
+        api_error_streak=0,
+        decision_latency_ms=100.0,
+        resting_quotes=resting,
+        rest_counter=0,
+        now=time.time(),
+        dry=False,
+        expected_px={},
+    )
+
+
+def test_quote_when_flat_places_bid_only(monkeypatch):
+    alp = QuotingAlpaca()
+    line, _, _, _, resting, _ = _quote(monkeypatch, alp, InventoryState())
+    assert [o["side"] for o in alp.orders] == ["buy"]
+    assert resting == {"bid": 100.0, "ask": None}
+    assert "sell side skipped" in line
+
+
+def test_quote_near_position_limit_skips_bid_and_caps_ask(monkeypatch):
+    alp = QuotingAlpaca()
+    inv = InventoryState()
+    inv.inventory = 0.45  # $45 held; one more $10 bid would breach $50
+    line, *_ = _quote(monkeypatch, alp, inv)
+    assert [o["side"] for o in alp.orders] == ["sell"]
+    assert alp.orders[0]["qty"] <= 0.45
+    assert "buy side skipped" in line
+
+
+def test_rejected_ask_still_tracks_the_resting_bid(monkeypatch):
+    alp = QuotingAlpaca(reject_sells=True)
+    inv = InventoryState()
+    inv.inventory = 0.2  # enough to try an ask, which the broker rejects
+    line, _, _, _, resting, _ = _quote(monkeypatch, alp, inv)
+    assert [o["side"] for o in alp.orders] == ["buy"]
+    assert resting["bid"] == 100.0  # cancelled on the next replace
+    assert "order error" in line and "sell:" in line
+
+
+# -- Directional market buys respect max_position_usd too ---------------------
+
+
+def _buy_signal(monkeypatch, alp, inv, resting=None, dry=False):
+    from jevloop import risk
+    from jevloop.limits import Limits
+    from jevloop.policy import QUOTE_BOTH_SIDES, Action
+
+    monkeypatch.setattr(risk, "check", lambda *a, **k: risk.RiskVerdict(ok=True))
+    return loop._execute_action(
+        alpaca=alp,
+        spec=resolve_symbol("BTC/USD"),
+        action=Action(QUOTE_BOTH_SIDES, "test", skew=0.5, direction_leg="up"),
+        bid_px=100.0,
+        ask_px=101.0,
+        mid=100.5,
+        quote_notional=10.0,
+        directional_notional=10.0,
+        snapshot={},
+        limits=Limits(),  # max_position_usd 50
+        inv=inv,
+        api_error_streak=0,
+        decision_latency_ms=100.0,
+        resting_quotes=resting,
+        rest_counter=0,  # rest_ticks not reached: no re-quote this tick
+        now=time.time(),
+        dry=dry,
+        expected_px={},
+    )
+
+
+def test_directional_buy_skipped_near_position_limit(monkeypatch):
+    for dry in (False, True):
+        alp = FakeAlpaca()
+        inv = InventoryState()
+        inv.inventory = 0.45  # $45 held; a $10 market buy would breach $50
+        _, fill_txt, *_ = _buy_signal(monkeypatch, alp, inv, resting={"bid": None, "ask": 101.0}, dry=dry)
+        assert "buy leg skipped" in fill_txt
+        assert alp.orders == []
+
+
+def test_directional_buy_counts_the_resting_bid(monkeypatch):
+    alp = FakeAlpaca()
+    inv = InventoryState()
+    inv.inventory = 0.3  # $30 held + $10 resting bid + $10 buy = $50.x
+    _, fill_txt, *_ = _buy_signal(monkeypatch, alp, inv, resting={"bid": 100.0, "ask": None})
+    assert "buy leg skipped" in fill_txt and alp.orders == []
+
+
+def test_directional_buy_goes_out_with_room(monkeypatch):
+    alp = FakeAlpaca()
+    _, fill_txt, *_ = _buy_signal(monkeypatch, alp, InventoryState(), resting={"bid": 100.0, "ask": None})
+    assert [o["side"] for o in alp.orders] == ["buy"]
+    assert fill_txt.startswith("sent market buy")

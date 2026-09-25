@@ -786,6 +786,7 @@ def _execute_action(
 
     if action.kind in (QUOTE_BOTH_SIDES, QUOTE_WIDE):
         fill_qty, fill_price = None, None
+        quote_note = ""
         buy_qty = size_order(quote_notional, bid_px, spec)
         sell_qty = size_order(quote_notional, ask_px, spec)
         # Gas-honesty rule: only cancel-replace every `rest_ticks` ticks.
@@ -796,19 +797,35 @@ def _execute_action(
                 rest_counter = 0
                 fill_txt = f"dry: would quote {buy_qty}/{sell_qty} @ {bid_px:,.2f}/{ask_px:,.2f}"
             else:
-                # Note: this account cannot short. A sell quote placed with
-                # no inventory to back it is a real, expected rejection on a
-                # cash account, caught as an AlpacaAPIError below.
+                # This account cannot short, so the ask is capped at the long
+                # this run built and skipped when that is under the venue
+                # minimum. The bid is skipped when filling it would push the
+                # position past max_position_usd: otherwise a run with no
+                # inventory keeps buying every tick (its asks all rejected)
+                # until the position limit KILLs it.
+                own = max(inv.inventory, 0.0)
+                step = 10 ** spec.qty_precision
+                sell_qty = min(sell_qty, math.floor(round(own * step, 6)) / step)
+                legs = []
+                if (own * mid + buy_qty * bid_px) <= limits.max_position_usd:
+                    legs.append(("buy", buy_qty, bid_px))
+                if sell_qty > 0 and sell_qty * ask_px >= spec.min_notional_usd:
+                    legs.append(("sell", sell_qty, ask_px))
+                placed, errors = [], []
                 try:
                     if resting_quotes:
                         alpaca.cancel_own_orders()
-                    inv.orders_submitted += 2
-                    for side_, qty_, px_ in (("buy", buy_qty, bid_px), ("sell", sell_qty, ask_px)):
-                        o = alpaca.submit_limit_order(side_, qty_, px_)
+                    for side_, qty_, px_ in legs:
+                        try:
+                            o = alpaca.submit_limit_order(side_, qty_, px_)
+                        except AlpacaAPIError as exc:
+                            inv.orders_rejected += 1
+                            errors.append(f"{side_}: {exc}")
+                            continue
+                        inv.orders_submitted += 1
+                        placed.append(side_)
                         if expected_px is not None and o.get("client_order_id"):
                             expected_px[o["client_order_id"]] = px_
-                    resting_quotes = {"bid": bid_px, "ask": ask_px}
-                    rest_counter = 0
                 except MarketClosedError as exc:
                     return (
                         f"{line_action} ({exc})",
@@ -819,8 +836,21 @@ def _execute_action(
                         rest_counter,
                     )
                 except AlpacaAPIError as exc:
+                    errors.append(f"cancel: {exc}")
+                # Any leg that went out is resting and must be cancelled on
+                # the next replace, even if the other leg failed.
+                resting_quotes = (
+                    {"bid": bid_px if "buy" in placed else None,
+                     "ask": ask_px if "sell" in placed else None}
+                    if placed else None
+                )
+                rest_counter = 0
+                skipped = [s for s in ("buy", "sell") if s not in {l[0] for l in legs}]
+                if skipped:
+                    quote_note = f" ({'/'.join(skipped)} side skipped)"
+                if errors:
                     return (
-                        f"{line_action} (order error: {exc})",
+                        f"{line_action}{quote_note} (order error: {'; '.join(errors)})",
                         fill_txt,
                         None,
                         None,
@@ -862,7 +892,16 @@ def _execute_action(
             side = "buy" if action.direction_leg == "up" else "sell"
             fill_px = bid_px if side == "sell" else ask_px
             leg_qty = size_order(directional_notional, fill_px, spec)
-            if dry:
+            # Same cap as the bid: a market buy on top of the run's long and
+            # any bid still resting must not push the position past
+            # max_position_usd, or the next tick's risk check KILLs the run.
+            exposure_usd = max(inv.inventory, 0.0) * mid
+            if resting_quotes and resting_quotes.get("bid") is not None:
+                exposure_usd += buy_qty * bid_px
+            if side == "buy" and exposure_usd + leg_qty * fill_px > limits.max_position_usd:
+                fill_txt = ("dry: " if dry else "") + "buy leg skipped (would exceed max_position_usd)"
+                line_action = f"{action.kind} skew {action.skew:+.1f} + buy leg skipped"
+            elif dry:
                 fill_txt = f"dry: would {side} {leg_qty} @ {fill_px:,.2f}"
                 line_action = (
                     f"{action.kind} skew {action.skew:+.1f} + {side} leg (dry)"
@@ -885,7 +924,7 @@ def _execute_action(
         else:
             line_action = f"{action.kind} skew {action.skew:+.1f}"
 
-        return line_action, fill_txt, fill_qty, fill_price, resting_quotes, rest_counter
+        return line_action + quote_note, fill_txt, fill_qty, fill_price, resting_quotes, rest_counter
 
     return line_action, fill_txt, None, None, resting_quotes, rest_counter
 
