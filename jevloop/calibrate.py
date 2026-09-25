@@ -29,7 +29,7 @@ import json
 import os
 from pathlib import Path
 
-LOG_DIR = Path(os.environ.get("JEV_LOOP_HOME", str(Path.home() / ".jev-loop")))
+LOG_DIR = Path(os.environ.get("JEV_LOOP_HOME", str(Path(__file__).resolve().parent.parent / "data")))
 LOG_FILE = LOG_DIR / "log.jsonl"
 DEFAULT_HORIZON = 30  # ticks: one minute at the default 2s tick
 

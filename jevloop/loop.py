@@ -69,7 +69,7 @@ from .policy import (
 from .pricing import quote_prices
 from .state import InventoryState, build_snapshot, record_fill_slippage, update_vwap
 
-LOG_DIR = Path(os.environ.get("JEV_LOOP_HOME", str(Path.home() / ".jev-loop")))
+LOG_DIR = Path(os.environ.get("JEV_LOOP_HOME", str(Path(__file__).resolve().parent.parent / "data")))
 LOG_FILE = LOG_DIR / "log.jsonl"
 LATEST_FILE = LOG_DIR / "latest.json"
 # Creating this file asks a running loop to stop cleanly (cancel resting
