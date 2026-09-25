@@ -24,7 +24,7 @@ if (Get-JevProcess 'serve') { Write-StartLog 'dashboard server already running' 
 else {
     Write-StartLog 'starting dashboard server'
     Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launcher, 'serve', '--port', '8765'
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$launcher`"", 'serve', '--port', '8765'
     )
 }
 
