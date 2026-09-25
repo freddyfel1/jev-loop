@@ -1,8 +1,0 @@
-requests>=2.31
-python-dotenv>=1.0
-
-[calibrate]
-matplotlib>=3.8
-
-[dev]
-pytest>=8.0
