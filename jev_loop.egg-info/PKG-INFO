@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: jev-loop
+Version: 0.1.0
+Summary: A 24/7 paper-trading loop: deterministic state, a seven-question Jev battery, code-owned policy and risk, Alpaca paper execution.
+Requires-Python: >=3.10
+Requires-Dist: requests>=2.31
+Requires-Dist: python-dotenv>=1.0
+Provides-Extra: calibrate
+Requires-Dist: matplotlib>=3.8; extra == "calibrate"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"

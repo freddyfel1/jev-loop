@@ -1,0 +1,2 @@
+[console_scripts]
+jev-loop = jevloop.__main__:main
