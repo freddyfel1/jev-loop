@@ -5,9 +5,9 @@ description: A 24/7 paper-trading loop for Alpaca, any crypto pair or US equity.
 
 # jev-loop
 
-Project location: `C:\Users\Asus-Gaming\Desktop\tradingBot\` (the project root, not
-this skill folder). This skill is project-scoped: it only exists in Claude Code
-sessions opened in the tradingBot folder. Run-time data (log, dashboard feed,
+Project location: `C:\Users\Asus-Gaming\Desktop\Trading Bots\jev-loop\` (the project
+root, not this skill folder). This skill is project-scoped: it only exists in Claude
+Code sessions opened in that folder. Run-time data (log, dashboard feed,
 reliability.png, CA bundle) lives in `data\` there, not `~/.jev-loop/`.
 Framework: Roan (@RohOnChain), "How to Use Jev to Build a 24/7 HFT Trading System". Installed as a Claude Code skill by Lewis Jackson.
 
@@ -58,7 +58,7 @@ output tees to `data\continuous.log`. Stop with Ctrl+C in that window
 Natural language, or directly:
 
 ```
-cd C:\Users\Asus-Gaming\Desktop\tradingBot
+cd "C:\Users\Asus-Gaming\Desktop\Trading Bots\jev-loop"
 .\jev.ps1 run --paper --ticks 60 --symbol BTC/USD
 .\jev.ps1 run --paper --mock            # force the mock client
 .\jev.ps1 run --paper --dry-execution   # real data and a real battery, no orders sent
