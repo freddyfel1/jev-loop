@@ -50,7 +50,10 @@ class Limits:
     as_horizon_s: float = 60.0  # T - t, the inventory-clearing horizon in seconds
 
     # --- execution/alpaca.py ---
-    tick_seconds: float = 2.0  # "block" = one tick of this loop. See README for why 2s.
+    # "block" = one tick of this loop. Was 2s; raised to 5s on 2026-09-26
+    # because a call every 2s (plus retries) kept hitting the gateway's
+    # 429 rate limit and most ticks ran out of time.
+    tick_seconds: float = 5.0
     rest_ticks: int = 3  # rest a resting quote this many ticks before cancel-replace
     quote_notional_usd: float = 20.0  # dollar target for each side of a quote
     directional_notional_usd: float = (

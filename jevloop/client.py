@@ -32,7 +32,10 @@ GATEWAY_BILLING_URL = (
     "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%3Fmodal%3Dadd-credit-card"
 )
 
-RETRYABLE_STATUS = {429, 529}
+# 429 is not retried: a rate limit means back off, and retrying inside the
+# same tick only spends more of the quota and eats the tick's time budget.
+# The next tick asks again anyway.
+RETRYABLE_STATUS = {529}
 MAX_RETRIES = 2
 BACKOFF_BASE_S = 0.35
 

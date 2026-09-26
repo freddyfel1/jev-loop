@@ -618,7 +618,7 @@ def _sync_inventory(inv: InventoryState, qty: float, avg_px: float, now: float) 
         inv.position_opened_at = None
 
 
-FILL_POLL_TICKS = 15  # fetch fills for the dashboard every ~30s at 2s ticks
+FILL_POLL_TICKS = 6  # fetch fills for the dashboard every ~30s at 5s ticks
 
 
 def _new_fill_stats() -> dict:
