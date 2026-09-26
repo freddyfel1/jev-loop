@@ -39,19 +39,21 @@ class FakeAlpaca:
         self.calls.append(("close",))
 
 
-def _snapshot(position_usd: float) -> dict:
+def _snapshot(position_usd: float, position_age_s: float = 10.0) -> dict:
     return dict(
         drawdown_pct=0.0,
         inventory=position_usd / MID,
         mid=MID,
         daily_loss_usd=0.0,
-        position_age_s=10.0,
+        position_age_s=position_age_s,
         data_age_s=0.2,
         leverage=1.0,
     )
 
 
-def _execute(alpaca, position_usd, open_buy_usd=0.0, leg=None, resting=None, rest_counter=0):
+def _execute(
+    alpaca, position_usd, open_buy_usd=0.0, leg=None, resting=None, rest_counter=0, age_s=10.0
+):
     return _execute_action(
         alpaca=alpaca,
         spec=BTC,
@@ -61,7 +63,7 @@ def _execute(alpaca, position_usd, open_buy_usd=0.0, leg=None, resting=None, res
         mid=MID,
         quote_notional=L.quote_notional_usd,
         directional_notional=L.directional_notional_usd,
-        snapshot=_snapshot(position_usd),
+        snapshot=_snapshot(position_usd, age_s),
         limits=L,
         inv=InventoryState(inventory=position_usd / MID),
         api_error_streak=0,
@@ -324,3 +326,47 @@ def test_open_buy_notional_counts_only_unfilled_buy_limits():
 def test_close_position_treats_404_as_already_flat():
     c = _client([FakeResponse(404, {"message": "position does not exist"})])
     c.close_position()  # no exception
+
+
+# --- inventory age: reduce-only, never a full block ----------------------
+# Regression (2026-09-26): a $17 BTC position held past 15 minutes vetoed
+# every order, including the sell that would have cleared it, so the loop
+# sat on QUOTING with no orders for hours.
+
+STALE = L.max_inventory_age_s + 1
+
+
+def test_stale_position_is_reduce_only_not_vetoed():
+    v = check(_snapshot(20.0, STALE), 20.0, L, 0, 90.0, dust_usd=BTC.min_notional_usd)
+    assert v.ok and v.reduce_only and not v.kill
+
+
+def test_stale_dust_under_the_venue_minimum_is_not_reduce_only():
+    v = check(_snapshot(5.0, STALE), 20.0, L, 0, 90.0, dust_usd=BTC.min_notional_usd)
+    assert v.ok and not v.reduce_only
+
+
+def test_stale_long_quotes_the_sell_side_only():
+    alpaca = FakeAlpaca()
+    line, *_, killed = _execute(alpaca, position_usd=20.0, age_s=STALE)
+    assert not killed
+    assert alpaca.calls == [("cancel_all",), ("limit", "sell")]
+    assert "reduce-only" in line
+
+
+def test_stale_long_drops_the_up_leg_but_keeps_the_down_leg():
+    alpaca = FakeAlpaca()
+    _execute(alpaca, position_usd=20.0, age_s=STALE, leg="up")
+    assert ("market", "buy") not in alpaca.calls
+    # Resting quotes not due for replacement, so no new sell quote reserves
+    # the holding and the down leg can sell it.
+    alpaca = FakeAlpaca()
+    _execute(alpaca, position_usd=20.0, age_s=STALE, leg="down", resting={"ask": MID}, rest_counter=0)
+    assert ("market", "sell") in alpaca.calls
+
+
+def test_stale_long_cancels_resting_buys_even_between_replacements():
+    alpaca = FakeAlpaca()
+    _execute(alpaca, position_usd=20.0, age_s=STALE, open_buy_usd=20.0, resting={"bid": MID, "ask": MID}, rest_counter=0)
+    assert alpaca.calls[0] == ("cancel_all",)
+    assert ("limit", "buy") not in alpaca.calls

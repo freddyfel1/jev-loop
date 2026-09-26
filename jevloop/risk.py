@@ -18,6 +18,8 @@ class RiskVerdict:
     ok: bool
     veto: str | None = None
     kill: bool = False
+    # ok, but only orders that shrink the position may go out (see limit 5).
+    reduce_only: bool = False
 
 
 def check(
@@ -27,6 +29,7 @@ def check(
     api_error_streak: int,
     decision_latency_ms: float | None,
     pending_buy_usd: float = 0.0,
+    dust_usd: float = 0.0,
 ) -> RiskVerdict:
     """`order_notional_usd` is the dollar value of the order about to be
     placed (qty * price), not a base-unit quantity: that is what makes
@@ -37,7 +40,11 @@ def check(
     `pending_buy_usd` is every buy that could still land on the position
     after this check: resting buy orders that will stay open plus the buys
     this tick is about to place. The position cap counts it, so a resting
-    quote filling between ticks can never carry the position past the cap."""
+    quote filling between ticks can never carry the position past the cap.
+
+    `dust_usd` is the venue's minimum order notional: a position worth less
+    than that cannot be sold, so it is exempt from the inventory-age limit
+    instead of pinning the loop in reduce-only mode forever."""
     # 1. max drawdown
     if snapshot["drawdown_pct"] > limits.max_drawdown_pct:
         return RiskVerdict(False, "max_drawdown breached", kill=True)
@@ -60,12 +67,14 @@ def check(
     if position_usd + pending_buy_usd > limits.max_position_usd:
         return RiskVerdict(False, "pending buys would breach max_position_usd")
 
-    # 5. max inventory age
-    if (
+    # 5. max inventory age. Reduce-only rather than a veto: blocking every
+    # order would also block the sell that clears the stale position, and
+    # the loop would sit there forever. The later checks still apply.
+    aged = (
         snapshot["inventory"] != 0
+        and position_usd >= dust_usd
         and snapshot["position_age_s"] > limits.max_inventory_age_s
-    ):
-        return RiskVerdict(False, "inventory held past max_inventory_age_s")
+    )
 
     # 6. max stale-data age
     if snapshot["data_age_s"] > limits.max_stale_data_age_s:
@@ -86,4 +95,8 @@ def check(
     if snapshot.get("leverage", 1.0) > limits.max_leverage:
         return RiskVerdict(False, "max_leverage breached", kill=True)
 
+    if aged:
+        return RiskVerdict(
+            True, "inventory held past max_inventory_age_s", reduce_only=True
+        )
     return RiskVerdict(True)

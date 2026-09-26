@@ -64,10 +64,16 @@ def test_order_notional_vetoes_without_kill():
     assert not v.ok and not v.kill
 
 
-def test_inventory_age_vetoes_without_kill():
+def test_inventory_age_goes_reduce_only_without_kill():
     snap = dict(OK_SNAPSHOT, position_age_s=99999.0)
     v = check(snap, 20.0, L, 0, 90.0)
-    assert not v.ok and not v.kill
+    assert v.ok and v.reduce_only and not v.kill
+
+
+def test_later_limits_still_veto_a_stale_position():
+    snap = dict(OK_SNAPSHOT, position_age_s=99999.0, data_age_s=999.0)
+    v = check(snap, 20.0, L, 0, 90.0)
+    assert not v.ok and "stale" in v.veto
 
 
 def test_stale_data_vetoes():

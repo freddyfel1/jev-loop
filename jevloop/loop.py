@@ -761,6 +761,7 @@ def _execute_action(
         api_error_streak,
         decision_latency_ms,
         pending_buy_usd=staying_buys_usd + new_buys_usd,
+        dust_usd=spec.min_notional_usd,
     )
     if not verdict.ok:
         if verdict.kill:
@@ -785,6 +786,21 @@ def _execute_action(
 
     fill_txt = "-"
     line_action = action.kind
+
+    # Reduce-only (position held past max_inventory_age_s): only the side
+    # that shrinks the position may go out. Resting orders on the other
+    # side are cancelled by forcing a cancel-replace this tick.
+    leg = action.direction_leg
+    reduce_only = verdict.reduce_only
+    reducing_side = "sell" if snapshot["inventory"] > 0 else "buy"
+    reduce_note = " (reduce-only: position held past max_inventory_age_s)" if reduce_only else ""
+    if reduce_only:
+        if leg == ("up" if reducing_side == "sell" else "down"):
+            leg = None
+        if reducing_side == "sell":
+            place_buy_quote = False
+            if quoting and open_buy_usd > 0:
+                replacing = True
 
     if action.kind in (PULL_QUOTES, STAND_DOWN):
         if not dry:
@@ -816,7 +832,12 @@ def _execute_action(
         held = _sellable_qty(snapshot["inventory"], spec)
         sell_qty = min(sell_qty, held)
         place_sell_quote = sell_qty * ask_px >= spec.min_notional_usd
-        buy_note = "" if place_buy_quote or not replacing else " (buy side held: at position cap)"
+        if reduce_only and reducing_side == "buy":
+            place_sell_quote = False
+        if reduce_only:
+            buy_note = reduce_note
+        else:
+            buy_note = "" if place_buy_quote or not replacing else " (buy side held: at position cap)"
         if replacing and not place_sell_quote:
             buy_note += " (sell side held: under the minimum order held)"
         # Gas-honesty rule: only cancel-replace every `rest_ticks` ticks.
@@ -866,8 +887,8 @@ def _execute_action(
                         False,
                     )
 
-        if action.direction_leg in ("up", "down"):
-            side = "buy" if action.direction_leg == "up" else "sell"
+        if leg in ("up", "down"):
+            side = "buy" if leg == "up" else "sell"
             if side == "buy" and not leg_up_fits:
                 return (
                     f"{action.kind} skew {action.skew:+.1f}{buy_note} + buy leg held: at position cap",
