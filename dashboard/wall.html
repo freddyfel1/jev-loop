@@ -34,6 +34,7 @@ const pts=[],sides=[],marks=[],pulses=[];let bigWord=null,band=null;
 function y(p){ if(lo===null||hi===null) return (TOP+BOT)/2; return TOP+(BOT-TOP)*(1-(p-lo)/Math.max(hi-lo,1e-6)); }
 
 function sideOf(t){
+  if(t.quote_fill==='buy'||t.quote_fill==='sell') return t.quote_fill; // a resting quote filled since the last tick
   if(t.late || t.action==='HOLD_LATE') return 'late';
   if(t.direction_leg==='up') return 'buy';
   if(t.direction_leg==='down') return 'sell';
@@ -43,6 +44,7 @@ function sideOf(t){
 const COL={buy:'#5cf07a',sell:'#ff5f5f',late:'#ffd166',quote:'#4fb3ff'};
 function wordOf(t,side){ return side==='quote'?'QUOTING':side==='late'?(t.action==='HOLD_LATE'?'LATE':(t.action||'HOLD')):side.toUpperCase(); }
 function confOf(t,side){
+  if(t.quote_fill===side&&t.quote_fill_qty!=null) return 'quote filled '+t.quote_fill_qty;
   if((side==='buy'||side==='sell')&&t.p_up!=null) return 'P(up) '+Math.round(t.p_up*100)+'%';
   if(side==='quote'&&t.quote_environment_conf!=null) return 'env '+Math.round(t.quote_environment_conf*100)+'%';
   return '';
