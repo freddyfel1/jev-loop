@@ -158,6 +158,9 @@ def run(
         )
 
     inv = InventoryState(equity_usd=0.0, high_water_mark_usd=0.0)
+    # Position at the end of the previous tick, to spot resting quotes
+    # that filled in between. None until the first tick has run.
+    prev_position: float | None = None
     api_error_streak = 0
     jev_down = False
     rest_counter = 0
@@ -251,6 +254,7 @@ def run(
                 _sleep_remaining(tick_start, limits.tick_seconds)
                 n += 1
                 continue
+            quote_fill, quote_fill_qty = _position_change(prev_position, pos_qty)
             _sync_inventory(inv, pos_qty, pos_avg_px, now)
 
             mid = (
@@ -455,11 +459,18 @@ def run(
                 "fill": fill_txt,
                 "fill_qty": fill_qty,
                 "fill_price": fill_price,
+                # A resting quote that filled since the last tick, seen as a
+                # change in the broker position: "buy", "sell" or None.
+                "quote_fill": quote_fill,
+                "quote_fill_qty": quote_fill_qty,
                 "open_buy_usd": round(open_buy_usd, 2),
                 "killed": killed,
                 "kill_result": kill_txt,
             }
             _append_log(record)
+            # After this tick's own market leg, so a leg is not counted
+            # again as a quote fill on the next tick.
+            prev_position = inv.inventory
             recent_ticks.append(record)
             if len(recent_ticks) > LATEST_WINDOW:
                 recent_ticks = recent_ticks[-LATEST_WINDOW:]
@@ -616,6 +627,18 @@ def _sync_inventory(inv: InventoryState, qty: float, avg_px: float, now: float) 
     else:
         inv.entry_price = 0.0
         inv.position_opened_at = None
+
+
+def _position_change(prev: float | None, now: float) -> tuple[str | None, float | None]:
+    """Side and size of a position change seen at the broker since the last
+    tick, i.e. a resting quote that filled in between. (None, None) on the
+    first tick or when nothing changed."""
+    if prev is None:
+        return None, None
+    delta = now - prev
+    if abs(delta) < 1e-9:
+        return None, None
+    return ("buy" if delta > 0 else "sell"), round(abs(delta), 10)
 
 
 FILL_POLL_TICKS = 6  # fetch fills for the dashboard every ~30s at 5s ticks
