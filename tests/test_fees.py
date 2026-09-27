@@ -66,3 +66,59 @@ def test_render_shows_the_three_headline_numbers():
     fills = [fill("buy", 0.001, 80_000), fill("sell", 0.001, 80_010)]
     text = render(compute_report(fills, [], mark=80_000, equity=99_999.70), "BTC/USD")
     assert "+$0.01" in text and "-$0.31" in text and "-$0.30" in text
+
+
+# --- --since: posted fees plus an estimate for fills not posted yet --------
+
+from jevloop.fees import SINCE_RE, compute_since_report, posted_fee_rate, render_since
+
+
+def fee(t, amount):
+    return dict(USD_FEE, created_at=t, net_amount=str(-amount))
+
+
+def test_posted_fee_rate_uses_the_oldest_fills_one_fee_each():
+    fills = [fill("buy", 0.001, 80_000, "2026-09-24T10:00:00Z"), fill("sell", 0.001, 80_000, "2026-09-24T11:00:00Z")]
+    # One fee posted so far: it belongs to the older, $80 fill.
+    assert posted_fee_rate(fills, [fee("2026-09-24T10:00:01Z", 0.16)]) == pytest.approx(0.002)
+
+
+def test_since_only_counts_fills_and_fees_in_the_period():
+    fills = [
+        fill("buy", 0.001, 80_000, "2026-09-24T10:00:00Z"),   # before: ignored
+        fill("buy", 0.001, 80_000, "2026-09-27T14:00:00Z"),
+        fill("sell", 0.001, 80_400, "2026-09-27T15:00:00Z"),  # +$0.40 round trip
+    ]
+    fees = [fee("2026-09-24T10:00:01Z", 0.16), fee("2026-09-27T14:00:01Z", 0.16), fee("2026-09-27T15:00:01Z", 0.16)]
+    r = compute_since_report(fills, fees, mark=80_000, since="2026-09-27T13:35")
+    assert (r["fills_buy"], r["fills_sell"]) == (1, 1)
+    assert r["gross_pnl_usd"] == pytest.approx(0.40)
+    assert r["fees_posted_usd"] == pytest.approx(0.32)
+    assert r["unposted_fills"] == 0
+    assert r["net_usd"] == pytest.approx(0.08)
+
+
+def test_unposted_fills_get_an_estimated_fee_at_the_posted_rate():
+    fills = [
+        fill("buy", 0.001, 80_000, "2026-09-24T10:00:00Z"),
+        fill("buy", 0.001, 80_000, "2026-09-27T14:00:00Z"),   # fee not posted yet
+    ]
+    r = compute_since_report(fills, [fee("2026-09-24T10:00:01Z", 0.16)], mark=80_000, since="2026-09-27")
+    assert r["unposted_fills"] == 1
+    assert r["fees_estimated_usd"] == pytest.approx(0.16)  # $80 at the 0.2% rate
+    assert "estimated for 1 fill" in render_since(r, "BTC/USD")
+
+
+def test_since_with_no_fills_yet_says_so():
+    r = compute_since_report([fill("buy", 0.001, 80_000, "2026-09-24T10:00:00Z")], [], mark=80_000, since="2026-09-27")
+    assert "no fills in this period yet" in render_since(r, "BTC/USD")
+
+
+@pytest.mark.parametrize("ok", ["2026-09-27", "2026-09-27T13:35", "2026-09-27T13:35:50"])
+def test_since_accepts_dates_and_times(ok):
+    assert SINCE_RE.match(ok)
+
+
+@pytest.mark.parametrize("bad", ["27/09/2026", "2026-9-27", "yesterday", "2026-09-27 13:35"])
+def test_since_rejects_other_formats(bad):
+    assert not SINCE_RE.match(bad)

@@ -15,12 +15,20 @@ cross-check on the fee rate:
 
 That assumes the account only trades this one symbol and has had no
 deposits or withdrawals since it opened.
+
+With --since, equity can't be used: Alpaca's equity history leaves out
+fees that haven't posted yet, so there is no honest equity value for the
+start of the period. Alpaca posts one fee record per fill, in fill order,
+so instead the period's fees are the posted records from that time on,
+plus an estimate for the newest fills whose fee hasn't posted yet, at the
+fee rate the account's own posted history shows. The estimate is labelled.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 from collections import defaultdict
 
 DEFAULT_START_EQUITY = 100_000.0  # what a new Alpaca paper account starts with
@@ -97,6 +105,91 @@ def compute_report(
     }
 
 
+def posted_fee_rate(fills: list[dict], fees: list[dict]) -> float | None:
+    """Fees as a fraction of traded value, over the fills whose fee has
+    posted: with one fee record per fill posted in fill order, those are
+    the oldest len(fees) fills."""
+    ordered = sorted(fills, key=lambda f: f["transaction_time"])[: len(fees)]
+    volume = sum(float(f["qty"]) * float(f["price"]) for f in ordered)
+    return sum(_fee_usd(f) for f in fees) / volume if volume else None
+
+
+def compute_since_report(fills: list[dict], fees: list[dict], mark: float, since: str) -> dict:
+    """Pure: trading P/L and fees for fills at or after `since` (UTC, as
+    YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS]). Trading P/L covers only the
+    period's own fills (the net quantity they bought valued at `mark`), not
+    price moves on a position already held when the period started."""
+    rate = posted_fee_rate(fills, fees)
+    win = sorted((f for f in fills if f["transaction_time"] >= since), key=lambda f: f["transaction_time"])
+    win_fees = [f for f in fees if (f.get("created_at") or f.get("date") or "") >= since]
+    unposted = win[len(win_fees):] if len(win) > len(win_fees) else []
+
+    buy_usd = sum(float(f["qty"]) * float(f["price"]) for f in win if f["side"] == "buy")
+    sell_usd = sum(float(f["qty"]) * float(f["price"]) for f in win if f["side"] == "sell")
+    net_qty = sum(float(f["qty"]) * (1 if f["side"] == "buy" else -1) for f in win)
+    volume = buy_usd + sell_usd
+    gross = sell_usd - buy_usd + net_qty * mark
+    posted = sum(_fee_usd(f) for f in win_fees)
+    unposted_volume = sum(float(f["qty"]) * float(f["price"]) for f in unposted)
+    estimated = unposted_volume * rate if rate is not None else 0.0
+    fees_total = posted + estimated
+    n = len(win)
+    return {
+        "since": since,
+        "fills_buy": sum(1 for f in win if f["side"] == "buy"),
+        "fills_sell": sum(1 for f in win if f["side"] == "sell"),
+        "volume_usd": volume,
+        "gross_pnl_usd": gross,
+        "fees_posted_usd": posted,
+        "fees_estimated_usd": estimated,
+        "unposted_fills": len(unposted),
+        "fee_rate": rate,
+        "fees_usd": fees_total,
+        "net_usd": gross - fees_total,
+        "avg_fill_usd": volume / n if n else 0.0,
+        "gross_per_fill_usd": gross / n if n else 0.0,
+        "fee_per_fill_usd": fees_total / n if n else 0.0,
+    }
+
+
+def render_since(r: dict, symbol: str) -> str:
+    lines = [
+        f"fees report: {symbol}, Alpaca paper account, fills since {r['since']} UTC",
+        f"  fills     {r['fills_buy']:,} buy / {r['fills_sell']:,} sell",
+    ]
+    if not r["fills_buy"] + r["fills_sell"]:
+        lines.append("  no fills in this period yet.")
+        return "\n".join(lines)
+    lines += [
+        f"  traded    ${r['volume_usd']:,.2f}  (avg fill ${r['avg_fill_usd']:,.2f})",
+        "",
+        f"  trading P/L before fees  {_money(r['gross_pnl_usd']):>12}",
+        f"  fees                     {_money(-r['fees_usd']):>12}",
+        f"  net                      {_money(r['net_usd']):>12}",
+        "",
+        f"  fees: {_money(-r['fees_posted_usd'])} posted"
+        + (
+            f", {_money(-r['fees_estimated_usd'])} estimated for {r['unposted_fills']} fill(s) "
+            f"not posted yet, at the account's {r['fee_rate'] * 100:.3f}% rate"
+            if r["unposted_fills"] and r["fee_rate"] is not None
+            else ""
+        ),
+    ]
+    if r["gross_per_fill_usd"] and r["fee_per_fill_usd"]:
+        lines.append(
+            f"  per fill: earns {r['gross_per_fill_usd'] * 100:+.2f} cents, pays "
+            f"{r['fee_per_fill_usd'] * 100:.2f} cents in fees"
+        )
+    lines.append(
+        "  trading P/L counts this period's fills only, valued at the current price; "
+        "not price moves on a position held before it."
+    )
+    return "\n".join(lines)
+
+
+SINCE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$")
+
+
 def _money(v: float) -> str:
     return f"{'+' if v >= 0 else '-'}${abs(v):,.2f}"
 
@@ -149,7 +242,15 @@ def main(argv: list[str]) -> int:
         default=DEFAULT_START_EQUITY,
         help="account equity when it opened (default 100000, Alpaca's paper default)",
     )
+    ap.add_argument(
+        "--since",
+        help="only fills from this UTC time on: YYYY-MM-DD or YYYY-MM-DDTHH:MM "
+        "(e.g. 2026-09-27T13:36, when the wider quotes went live)",
+    )
     a = ap.parse_args(argv)
+    if a.since and not SINCE_RE.match(a.since):
+        print(f"--since must look like 2026-09-27 or 2026-09-27T13:35 (UTC), got {a.since!r}")
+        return 1
     try:
         # Paper only, and gentle on the rate limit: the trading loop shares
         # the account's Alpaca call budget and may be running right now.
@@ -169,6 +270,9 @@ def main(argv: list[str]) -> int:
         return 1
     if not fills:
         print(f"no {a.symbol} fills on this account yet.")
+        return 0
+    if a.since:
+        print(render_since(compute_since_report(fills, fees, mark, a.since), a.symbol))
         return 0
     print(render(compute_report(fills, fees, mark, equity, a.start_equity), a.symbol))
     return 0
