@@ -319,6 +319,23 @@ class AlpacaPaperClient:
             params = dict(params, page_token=page[-1]["id"])
         return fills
 
+    def get_activities(self, kind: str, max_pages: int = 500) -> list[dict]:
+        """Every account activity of type `kind` (e.g. FILL, CFEE), newest
+        first, across pages. Read-only; used by `jev-loop fees`."""
+        out: list[dict] = []
+        params = {"direction": "desc", "page_size": 100}
+        for _ in range(max_pages):
+            page = self._request(
+                "GET", f"{self.base_url}/v2/account/activities/{kind}", params=params
+            )
+            if not page:
+                break
+            out.extend(page)
+            if len(page) < 100:
+                break
+            params = dict(params, page_token=page[-1]["id"])
+        return out
+
     def close_position(self) -> None:
         """Flatten this symbol at market. A 404 means it is already flat."""
         try:

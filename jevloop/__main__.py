@@ -1,4 +1,4 @@
-"""CLI dispatcher: `jev-loop run|calibrate|serve|validate-symbol|explain-split`.
+"""CLI dispatcher: `jev-loop run|calibrate|fees|serve|validate-symbol|explain-split`.
 
 Also invocable as `uv run python -m jevloop <command> ...` from inside the
 skill directory, which is what the /jev-loop skill's SKILL.md tells Claude
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 
-USAGE = "usage: jev-loop <run|calibrate|serve|validate-symbol|explain-split> [options]"
+USAGE = "usage: jev-loop <run|calibrate|fees|serve|validate-symbol|explain-split> [options]"
 
 
 def _validate_symbol(argv: list[str]) -> int:
@@ -56,6 +56,10 @@ def main() -> int:
         from . import calibrate
 
         return calibrate.main(rest)
+    if command == "fees":
+        from . import fees
+
+        return fees.main(rest)
     if command == "serve":
         from . import serve
 
