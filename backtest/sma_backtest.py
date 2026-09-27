@@ -6,7 +6,9 @@ backtest never trades on information it didn't have yet. A fee is charged
 on every buy and every sell. No shorting, no leverage, no live trading.
 
 Data: tries Yahoo Finance via yfinance first (works on a normal home
-connection). If that fails, it falls back to free offline datasets:
+connection; on this PC it uses jev-loop's data/ca-bundle.pem automatically,
+because Norton re-signs HTTPS). If that fails, it falls back to free offline
+datasets:
   - GOOG daily 2004-2013, bundled with the `backtesting` pip package
   - BTC/USD hourly 2011-2017 (Bitstamp), from github.com/bukosabino/ta,
     resampled to daily bars
@@ -20,12 +22,28 @@ Usage:
 
 import argparse
 import io
+import os
 import urllib.request
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 BTC_OFFLINE_URL = "https://raw.githubusercontent.com/bukosabino/ta/master/test/data/datas.csv"
+
+# certifi + the Norton Web/Mail Shield root, kept by the jev-loop launcher.
+# Norton re-signs HTTPS on this PC, and yfinance's curl only trusts its own
+# CA list, so without this every Yahoo download fails with an SSL error.
+CA_BUNDLE = Path(__file__).resolve().parent.parent / "data" / "ca-bundle.pem"
+
+
+def use_local_ca_bundle():
+    """Point curl (yfinance) at data/ca-bundle.pem if it exists and nothing
+    else was set. Returns the bundle path used, or None."""
+    if os.environ.get("CURL_CA_BUNDLE") or not CA_BUNDLE.exists():
+        return None
+    os.environ["CURL_CA_BUNDLE"] = str(CA_BUNDLE)
+    return CA_BUNDLE
 
 
 def load_yahoo(ticker, start="2018-01-01"):
@@ -137,6 +155,7 @@ def main():
 
     datasets = []
     if not a.offline:
+        use_local_ca_bundle()
         try:
             datasets = [
                 (a.stock, load_yahoo(a.stock), 252),
