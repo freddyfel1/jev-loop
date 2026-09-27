@@ -43,8 +43,14 @@ def quote_prices(
     gamma: float,
     kappa: float,
     time_left_s: float,
+    min_half_spread_frac: float = 0.0,
 ) -> tuple[float, float]:
-    """Convenience wrapper: returns (bid, ask) around the reservation price."""
+    """Convenience wrapper: returns (bid, ask) around the reservation price.
+
+    `min_half_spread_frac` floors the half spread at that fraction of mid.
+    On a venue that charges a fee per side, a round trip only pays when the
+    quotes are further apart than the two fees together; the A-S spread
+    alone is far narrower than that on BTC."""
     r = reservation_price(mid, inventory, gamma, sigma, time_left_s)
-    h = half_spread(gamma, sigma, time_left_s, kappa)
+    h = max(half_spread(gamma, sigma, time_left_s, kappa), mid * min_half_spread_frac)
     return r - h, r + h

@@ -48,6 +48,12 @@ class Limits:
     as_gamma: float = 0.10  # risk aversion
     as_kappa: float = 1.5  # order book liquidity / arrival-rate parameter
     as_horizon_s: float = 60.0  # T - t, the inventory-clearing horizon in seconds
+    # Floor on each quote's distance from the reservation price, as a
+    # fraction of mid: 0.25% a side, 0.5% between bid and ask. Added
+    # 2026-09-27: `jev-loop fees` showed Alpaca's crypto fees at ~0.21% of
+    # every fill (~0.42% a round trip) while the A-S spread alone was
+    # ~0.015% a side, so each round trip lost ~65x what it earned.
+    min_half_spread_frac: float = 0.0025
 
     # --- execution/alpaca.py ---
     # "block" = one tick of this loop. Was 2s; raised to 5s on 2026-09-26
