@@ -254,7 +254,10 @@ def run(
                 _sleep_remaining(tick_start, limits.tick_seconds)
                 n += 1
                 continue
-            quote_fill, quote_fill_qty = _position_change(prev_position, pos_qty)
+            quote_fill, quote_fill_qty = _position_change(
+                prev_position, pos_qty, price=float(trade.get("p", 0.0)),
+                min_usd=FILL_LABEL_MIN_FRACTION * spec.min_notional_usd,
+            )
             _sync_inventory(inv, pos_qty, pos_avg_px, now)
 
             mid = (
@@ -629,14 +632,25 @@ def _sync_inventory(inv: InventoryState, qty: float, avg_px: float, now: float) 
         inv.position_opened_at = None
 
 
-def _position_change(prev: float | None, now: float) -> tuple[str | None, float | None]:
+# Position changes worth less than this fraction of the venue's minimum
+# order are not labelled as fills. Alpaca takes crypto fees out of the coin
+# received, settled a moment after the fill, so a $20 buy is followed by a
+# ~3-cent drop that would otherwise show as a SELL. Real fills, even
+# partial ones, are far larger.
+FILL_LABEL_MIN_FRACTION = 0.1
+
+
+def _position_change(
+    prev: float | None, now: float, price: float = 0.0, min_usd: float = 0.0
+) -> tuple[str | None, float | None]:
     """Side and size of a position change seen at the broker since the last
     tick, i.e. a resting quote that filled in between. (None, None) on the
-    first tick or when nothing changed."""
+    first tick, when nothing changed, or when the change is worth less than
+    `min_usd` at `price` (fee settlement, not a fill)."""
     if prev is None:
         return None, None
     delta = now - prev
-    if abs(delta) < 1e-9:
+    if abs(delta) < 1e-9 or (price > 0 and abs(delta) * price < min_usd):
         return None, None
     return ("buy" if delta > 0 else "sell"), round(abs(delta), 10)
 
