@@ -342,6 +342,7 @@ def run(
                 gamma=limits.as_gamma,
                 kappa=limits.as_kappa,
                 time_left_s=limits.as_horizon_s,
+                min_half_spread_frac=limits.min_half_spread_frac,
             )
 
             # ladder
