@@ -13,7 +13,7 @@ any of it, and execution defaults to Alpaca's paper API everywhere.
 ```bash
 cd ~/.claude/skills/jev-loop
 cp .env.example .env        # fill in ALPACA_API_KEY / ALPACA_SECRET_KEY at minimum
-uv run pytest -q             # tests, no network needed
+uv run --extra dev pytest -q # tests, no network needed
 uv run python -m jevloop explain-split         # the split, as a table
 uv run python -m jevloop validate-symbol AAPL  # resolve any symbol first
 uv run python -m jevloop run --paper --ticks 30 --symbol BTC/USD
